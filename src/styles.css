@@ -1,0 +1,19 @@
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  color: #171a21;
+  background: #fff;
+}
+
+html,
+body,
+#root {
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
