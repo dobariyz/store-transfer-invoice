@@ -3,3 +3,10 @@ dist/
 .env
 .env.*
 !.env.example
+# Local export and generated files
+products.json
+transfers.json
+out/
+package-lock.json
+.agents/
+skills-lock.json

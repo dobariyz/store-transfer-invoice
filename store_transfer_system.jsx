@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import * as XLSX from "xlsx";
+import { createClient } from '@supabase/supabase-js';
 import {
   Upload, Package, History, LayoutDashboard, Printer, AlertTriangle,
   CheckCircle2, Search, ArrowRightLeft, X, Trash2, ChevronRight,
@@ -4484,18 +4485,69 @@ function money(n) {
 
 async function loadTransfers() {
   try {
+    const SUPA_URL = import.meta.env.VITE_SUPABASE_URL;
+    const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+    const supabase = SUPA_URL && SUPA_KEY ? createClient(SUPA_URL, SUPA_KEY) : null;
+    if (supabase) {
+      // load transfers and their items from Supabase
+      const { data: tdata, error: terr } = await supabase.from('transfers').select('*').order('date', { ascending: true });
+      if (terr) throw terr;
+      if (!tdata || !tdata.length) return [];
+      const ids = tdata.map(t => t.id);
+      const { data: items, error: ierr } = await supabase.from('transfer_items').select('*').in('transfer_id', ids);
+      if (ierr) throw ierr;
+      const itemsById = {};
+      (items || []).forEach(it => {
+        itemsById[it.transfer_id] = itemsById[it.transfer_id] || [];
+        itemsById[it.transfer_id].push({ sku: it.sku, name: it.name, category: it.category, qty: it.qty, unitPrice: it.unit_price ?? it.unitPrice, lineTotal: it.line_total ?? it.lineTotal, metadata: it.metadata });
+      });
+      return tdata.map(t => ({ id: t.id, date: t.date, fromStore: t.from_store || t.fromStore, toStore: t.to_store || t.toStore, notes: t.notes, subtotal: t.subtotal, hst: t.hst, total: t.total, createdAt: t.created_at, reconciledWith: t.reconciled_with, raw: t.raw, items: itemsById[t.id] || [] }));
+    }
     if (window.storage?.get) {
       const res = await window.storage.get("transfers", true);
       return res ? JSON.parse(res.value) : [];
     }
     return JSON.parse(window.localStorage.getItem("store-transfer:transfers") || "[]");
-  } catch {
+  } catch (e) {
+    console.error('loadTransfers error', e);
     return [];
   }
 }
 
 async function saveTransfers(transfers) {
   try {
+    const SUPA_URL = import.meta.env.VITE_SUPABASE_URL;
+    const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+    const supabase = SUPA_URL && SUPA_KEY ? createClient(SUPA_URL, SUPA_KEY) : null;
+    if (supabase) {
+      // upsert transfers and transfer_items
+      for (const t of transfers) {
+        const up = {
+          id: t.id,
+          date: t.date,
+          from_store: t.fromStore,
+          to_store: t.toStore,
+          notes: t.notes,
+          subtotal: t.subtotal,
+          hst: t.hst,
+          total: t.total,
+          created_at: t.createdAt || new Date().toISOString(),
+          reconciled_with: t.reconciledWith || null,
+          raw: t.raw || t,
+        };
+        const { error: uerr } = await supabase.from('transfers').upsert(up);
+        if (uerr) console.error('upsert transfer error', uerr);
+        // replace items
+        const { error: derr } = await supabase.from('transfer_items').delete().eq('transfer_id', t.id);
+        if (derr) console.error('delete transfer_items error', derr);
+        const itemsToInsert = (t.items || []).map(it => ({ transfer_id: t.id, sku: it.sku, name: it.name, category: it.category, qty: it.qty, unit_price: it.unitPrice, line_total: it.lineTotal, metadata: it.metadata || null }));
+        if (itemsToInsert.length) {
+          const { error: ierr } = await supabase.from('transfer_items').insert(itemsToInsert);
+          if (ierr) console.error('insert transfer_items error', ierr);
+        }
+      }
+      return;
+    }
     if (window.storage?.set) {
       await window.storage.set("transfers", JSON.stringify(transfers), true);
       return;
@@ -4508,25 +4560,44 @@ async function saveTransfers(transfers) {
 
 async function loadProducts() {
   try {
+    const SUPA_URL = import.meta.env.VITE_SUPABASE_URL;
+    const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+    const supabase = SUPA_URL && SUPA_KEY ? createClient(SUPA_URL, SUPA_KEY) : null;
+    if (supabase) {
+      const { data, error } = await supabase.from('products').select('*').order('sku', { ascending: true });
+      if (error) throw error;
+      if (!data) return null;
+      return data.map(p => ({ sku: p.sku, name: p.name, category: p.category, subcategory: p.subcategory, unitPrice: p.unit_price ?? p.unitPrice, priceType: p.price_type, packQty: p.pack_qty ?? p.packQty, packPrice: p.pack_price ?? p.packPrice, metadata: p.metadata, createdAt: p.created_at }));
+    }
     if (window.storage?.get) {
       const res = await window.storage.get("products", true);
       return res ? JSON.parse(res.value) : null;
     }
     return JSON.parse(window.localStorage.getItem("store-transfer:products") || "null");
-  } catch {
+  } catch (e) {
+    console.error('loadProducts error', e);
     return null;
   }
 }
 
 async function saveProducts(products) {
   try {
+    const SUPA_URL = import.meta.env.VITE_SUPABASE_URL;
+    const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+    const supabase = SUPA_URL && SUPA_KEY ? createClient(SUPA_URL, SUPA_KEY) : null;
+    if (supabase) {
+      const toUpsert = products.map(p => ({ sku: p.sku, name: p.name, category: p.category, subcategory: p.subcategory || null, unit_price: p.unitPrice, price_type: p.priceType, pack_qty: p.packQty || null, pack_price: p.packPrice || null, metadata: p.metadata || null, created_at: p.createdAt || new Date().toISOString() }));
+      const { error } = await supabase.from('products').upsert(toUpsert);
+      if (error) console.error('upsert products error', error);
+      return;
+    }
     if (window.storage?.set) {
       await window.storage.set("products", JSON.stringify(products), true);
       return;
     }
     window.localStorage.setItem("store-transfer:products", JSON.stringify(products));
   } catch (e) {
-    console.error("Failed to save products", e);
+    console.error('saveProducts error', e);
   }
 }
 
@@ -4546,6 +4617,7 @@ const FONT_IMPORT = `
 function Sidebar({ view, setView, stores, productCount }) {
   const items = [
     { id: "new", label: "New Transfer", icon: ArrowRightLeft },
+    { id: "reconcile", label: "Reconcile", icon: CheckCircle2 },
     { id: "history", label: "Transfer History", icon: History },
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "products", label: "Product Database", icon: Package },
@@ -5107,6 +5179,184 @@ function HistoryView({ transfers, loading, onEdit, onDelete }) {
   );
 }
 
+function ReconcileView({ transfers, products, stores, onCreateTransfers }) {
+  const prodBySku = useMemo(() => {
+    const m = new Map(); products.forEach(p => m.set(p.sku, p)); return m;
+  }, [products]);
+
+  const computed = useMemo(() => {
+    const pairs = {};
+    for (const t of transfers) {
+      for (const it of t.items) {
+        const sku = it.sku || it.name || "";
+        const a = t.fromStore; const b = t.toStore;
+        const [s1, s2] = a < b ? [a, b] : [b, a];
+        const key = `${sku}||${s1}||${s2}`;
+        const sign = (t.fromStore === s1 && t.toStore === s2) ? 1 : -1;
+        if (!pairs[key]) pairs[key] = { sku, name: it.name || (prodBySku.get(sku) && prodBySku.get(sku).name) || "", unitPrice: it.unitPrice || (prodBySku.get(sku) && prodBySku.get(sku).unitPrice) || 0, s1, s2, delta: 0, sources: [] };
+        const qty = Number(it.qty) || 0;
+        pairs[key].delta += sign * qty;
+        pairs[key].sources.push({ transferId: t.id, date: t.date, fromStore: t.fromStore, toStore: t.toStore, qty: sign * qty, unitPrice: it.unitPrice || pairs[key].unitPrice });
+      }
+    }
+    const rows = [];
+    Object.values(pairs).forEach(p => {
+      if (!p.delta) return;
+      if (p.delta > 0) rows.push({ id: uid(), sku: p.sku, name: p.name, from: p.s1, to: p.s2, qty: p.delta, unitPrice: p.unitPrice, sources: p.sources });
+      else rows.push({ id: uid(), sku: p.sku, name: p.name, from: p.s2, to: p.s1, qty: -p.delta, unitPrice: p.unitPrice, sources: p.sources });
+    });
+    return rows;
+  }, [transfers, prodBySku]);
+
+  const [rows, setRows] = useState(computed);
+  useEffect(() => setRows(computed), [computed]);
+  const [detail, setDetail] = useState(null);
+  const [generated, setGenerated] = useState([]);
+  const [genIndex, setGenIndex] = useState(0);
+
+  const updateQty = (id, qty) => setRows(rs => rs.map(r => r.id === id ? { ...r, qty: Math.max(0, Math.floor(Number(qty) || 0)) } : r));
+
+  const groupedByPair = useMemo(() => {
+    const m = new Map();
+    for (const r of rows.filter(x => x.qty > 0)) {
+      const key = `${r.from}||${r.to}`;
+      if (!m.has(key)) m.set(key, []);
+      m.get(key).push(r);
+    }
+    return m;
+  }, [rows]);
+
+  const [generatedMapping, setGeneratedMapping] = useState({});
+
+  const handleCreate = () => {
+    if (groupedByPair.size === 0) return;
+    const today = new Date().toISOString().slice(0,10);
+    const created = [];
+    const markMap = {};
+    for (const [key, items] of groupedByPair.entries()) {
+      const [fromStore, toStore] = key.split("||");
+      const tItems = items.map(it => ({ sku: it.sku, name: it.name, qty: it.qty, unitPrice: it.unitPrice || 0, lineTotal: Math.round((it.unitPrice || 0) * it.qty * 100)/100 }));
+      const subtotal = tItems.reduce((s,it) => s + (Number(it.lineTotal)||0), 0);
+      const hst = Math.round(subtotal * HST_RATE * 100)/100;
+      const total = Math.round((subtotal + hst) * 100)/100;
+      const t = { id: uid(), date: today, fromStore, toStore, notes: `Reconciled invoice (${today})`, items: tItems, subtotal, hst, total, createdAt: new Date().toISOString() };
+      created.push(t);
+      // collect source transfer ids for these items
+      const invoiceId = t.id;
+      const sourceIds = new Set();
+      items.forEach(it => (it.sources || []).forEach(s => sourceIds.add(s.transferId)));
+      sourceIds.forEach(sid => { markMap[sid] = markMap[sid] || []; markMap[sid].push(invoiceId); });
+    }
+    if (created.length) {
+      setGenerated(created);
+      setGeneratedMapping(markMap);
+      setGenIndex(0);
+    }
+  };
+
+  return (
+    <div style={{ padding: "28px 36px" }}>
+      <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 24, fontWeight: 700, margin: 0, color: "#171a21" }}>Reconcile Transfers</h1>
+      <p style={{ color: "#767c8c", fontSize: 13.5, marginTop: 5, marginBottom: 22 }}>See net movements between store pairs. Edit quantities and create adjustment transfers to reconcile back-and-forth moves.</p>
+      {rows.length === 0 ? (
+        <EmptyState text="No net movements to reconcile." />
+      ) : (
+        <div>
+          <div style={{ border: "1px solid #e8e9ee", borderRadius: 10, overflow: "hidden", maxHeight: 520, overflowY: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead style={{ position: "sticky", top: 0, background: "#f8f8fa", zIndex: 1 }}>
+                <tr style={{ textAlign: "left" }}>
+                  {["SKU", "Product", "From", "To", "Qty"].map(h => (
+                    <th key={h} style={{ padding: "8px 12px", fontWeight: 600, color: "#6b7080", fontSize: 11, textTransform: "uppercase" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(r => (
+                  <tr key={r.id} style={{ borderTop: "1px solid #f0f1f4", cursor: "pointer" }} onClick={() => setDetail(r)}>
+                    <td style={{ padding: "10px" }}>{r.sku || "—"}</td>
+                    <td style={{ padding: "10px", fontWeight: 600 }}>{r.name || "—"}</td>
+                    <td style={{ padding: "10px" }}>{r.from}</td>
+                    <td style={{ padding: "10px" }}>{r.to}</td>
+                    <td style={{ padding: "10px" }}>
+                      <input type="number" value={r.qty} min={0} onChange={e => updateQty(r.id, e.target.value)} style={{ width: 96, padding: 6 }} onClick={e => e.stopPropagation()} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ marginTop: 14, display: "flex", gap: 10, alignItems: "center" }}>
+            <button onClick={handleCreate} style={{ background: "#171a21", color: "#fff", border: "none", padding: "10px 16px", borderRadius: 8, cursor: "pointer" }}>Generate Invoice(s)</button>
+            <button onClick={() => setRows(computed)} style={{ ...ghostBtn }}>Reset</button>
+            <div style={{ color: "#767c8c", fontSize: 13 }}>Click a product row to see contributing transactions.</div>
+          </div>
+        </div>
+      )}
+      {detail && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(15,17,23,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 120 }} onClick={() => setDetail(null)}>
+          <div style={{ background: "#fff", borderRadius: 12, width: 720, maxHeight: "70vh", overflowY: "auto", padding: 18 }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ fontWeight: 700 }}>{detail.name || detail.sku}</div>
+              <button onClick={() => setDetail(null)} style={ghostBtn}>Close</button>
+            </div>
+            <div style={{ marginBottom: 10, color: "#666" }}>Transactions contributing to this net movement (signed quantities show direction):</div>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ textAlign: "left", borderBottom: "1px solid #eee" }}>
+                  { ["Date","Transfer ID","From","To","Qty","Unit"] .map(h => <th key={h} style={{ padding: 8, color: "#666", fontSize: 12 }}>{h}</th>) }
+                </tr>
+              </thead>
+              <tbody>
+                {(detail.sources||[]).map((s,i) => (
+                  <tr key={i} style={{ borderBottom: "1px solid #f5f5f7" }}>
+                    <td style={{ padding: 8, fontFamily: "'IBM Plex Mono', monospace" }}>{s.date}</td>
+                    <td style={{ padding: 8, fontFamily: "'IBM Plex Mono', monospace" }}>{s.transferId}</td>
+                    <td style={{ padding: 8 }}>{s.fromStore}</td>
+                    <td style={{ padding: 8 }}>{s.toStore}</td>
+                    <td style={{ padding: 8, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700 }}>{s.qty}</td>
+                    <td style={{ padding: 8, fontFamily: "'IBM Plex Mono', monospace" }}>{money(s.unitPrice)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {generated.length > 0 && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(15,17,23,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 130 }}>
+          <div style={{ width: 760, maxHeight: "90vh", overflowY: "auto", background: "#fff", borderRadius: 12, padding: 18 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div style={{ fontWeight: 700 }}>Generated Invoices ({generated.length})</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => { setGenerated([]); }} style={ghostBtn}>Close</button>
+              </div>
+            </div>
+            <div>
+              <div style={{ marginBottom: 10, display: "flex", gap: 8, alignItems: "center" }}>
+                <button onClick={() => setGenIndex(i => Math.max(0, i-1))} disabled={genIndex===0} style={ghostBtn}>Prev</button>
+                <button onClick={() => setGenIndex(i => Math.min(generated.length-1, i+1))} disabled={genIndex===generated.length-1} style={ghostBtn}>Next</button>
+                <div style={{ marginLeft: 8, color: "#666" }}>Viewing {genIndex+1} of {generated.length}</div>
+                <button onClick={() => window.print()} style={{ marginLeft: 'auto', ...ghostBtn }}>Print</button>
+                <button onClick={() => {
+                  // save generated invoices and mark source transfers
+                  if (typeof onCreateTransfers === 'function') onCreateTransfers(generated);
+                  if (typeof onMarkTransfers === 'function' && generatedMapping && Object.keys(generatedMapping).length) onMarkTransfers(generatedMapping);
+                  setGenerated([]);
+                  setGeneratedMapping({});
+                  alert('Saved generated invoices to Transfer History and marked source transfers as reconciled.');
+                }} style={{ ...ghostBtn, marginLeft: 8 }}>Save to History</button>
+              </div>
+              <InvoiceSlip invoice={generated[genIndex]} />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function EmptyState({ text }) {
   return (
     <div style={{ border: "1px dashed #d8dbe3", borderRadius: 10, padding: "40px 20px", textAlign: "center", color: "#9aa0ae", fontSize: 13 }}>
@@ -5550,6 +5800,30 @@ export default function StoreTransferApp() {
     });
   }, []);
 
+  const handleCreateMultipleTransfers = useCallback((newTransfers) => {
+    setTransfers(prev => {
+      const next = [...prev, ...newTransfers];
+      saveTransfers(next);
+      return next;
+    });
+  }, []);
+
+  const handleMarkTransfers = useCallback((markMap) => {
+    // markMap: { transferId: [invoiceId, ...], ... }
+    setTransfers(prev => {
+      const next = prev.map(t => {
+        if (markMap[t.id]) {
+          const existing = Array.isArray(t.reconciledWith) ? t.reconciledWith : [];
+          const merged = Array.from(new Set([...existing, ...markMap[t.id]]));
+          return { ...t, reconciledWith: merged };
+        }
+        return t;
+      });
+      saveTransfers(next);
+      return next;
+    });
+  }, []);
+
   const handleEditTransfer = useCallback((transfer) => {
     setTransferToEdit(transfer);
     setView("new");
@@ -5572,6 +5846,7 @@ export default function StoreTransferApp() {
       <Sidebar view={view} setView={handleViewChange} stores={stores} productCount={products.length} />
       <div style={{ flex: 1, overflowY: "auto" }}>
         {view === "new" && <NewTransferView key={transferToEdit?.id || "new"} stores={stores} products={products} onCreateTransfer={handleCreateTransfer} initialTransfer={transferToEdit} />}
+        {view === "reconcile" && <ReconcileView transfers={transfers} products={products} stores={stores} onCreateTransfers={handleCreateMultipleTransfers} onMarkTransfers={handleMarkTransfers} />}
         {view === "history" && <HistoryView transfers={transfers} loading={loading} onEdit={handleEditTransfer} onDelete={handleDeleteTransfer} />}
         {view === "dashboard" && <DashboardView transfers={transfers} stores={stores} />}
         {view === "products" && <ProductsView products={products} onUpdateProduct={handleUpdateProduct} />}
