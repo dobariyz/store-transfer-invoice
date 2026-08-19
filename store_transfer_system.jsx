@@ -5492,6 +5492,19 @@ function blankProductRow() {
   return { id: uid(), sku: "", name: "", category: "Convenience", unitPrice: "", priceType: "Per Unit", packQty: 1 };
 }
 
+function parseInvoiceText(text, existingSkus) {
+  return text.split(/\r?\n/).map(line => line.replace(/\s+/g, " ").trim()).filter(Boolean).map(line => {
+    const priceMatches = [...line.matchAll(/\$?\d{1,6}(?:,\d{3})*(?:\.\d{2})/g)].map(m => Number(m[0].replace(/[$,]/g, "")));
+    const skuMatch = line.match(/\b[A-Z0-9][A-Z0-9/_-]{2,}\b/);
+    const qtyMatch = line.match(/(?:qty|quantity|x)\s*[:#]?\s*(\d+)/i);
+    const price = priceMatches.length ? priceMatches[priceMatches.length - 1] : NaN;
+    const sku = skuMatch ? skuMatch[0] : "";
+    const name = line.replace(sku, "").replace(/(?:qty|quantity|x)\s*[:#]?\s*\d+/i, "").replace(/\$?\d{1,6}(?:,\d{3})*(?:\.\d{2})/g, "").replace(/[|;,]+/g, " ").trim();
+    const valid = !!name && !isNaN(price) && !/^(subtotal|total|tax|hst|invoice|date|supplier|payment)/i.test(name);
+    return { id: uid(), sku, name, category: "Other", unitPrice: price, priceType: "Per Unit", packQty: 1, qty: qtyMatch ? Number(qtyMatch[1]) : 1, valid, isDuplicate: existingSkus.has(sku), include: valid && !existingSkus.has(sku), needsReview: true };
+  }).filter(r => r.name || r.sku);
+}
+
 function AddProductsView({ products, onAddProducts }) {
   const [mode, setMode] = useState("manual");
   const [manualRows, setManualRows] = useState([blankProductRow(), blankProductRow(), blankProductRow()]);
@@ -5499,6 +5512,8 @@ function AddProductsView({ products, onAddProducts }) {
   const [bulkRows, setBulkRows] = useState([]);
   const [fileName, setFileName] = useState("");
   const [error, setError] = useState("");
+  const [invoiceRows, setInvoiceRows] = useState([]);
+  const [invoiceProgress, setInvoiceProgress] = useState("");
   const fileInputRef = useRef(null);
   const existingSkus = useMemo(() => new Set(products.map(p => p.sku)), [products]);
 
@@ -5557,6 +5572,46 @@ function AddProductsView({ products, onAddProducts }) {
     }
   };
 
+  const handleInvoiceFile = async (file) => {
+    setError(""); setFileName(file.name); setSavedCount(null); setInvoiceProgress("Reading invoice...");
+    try {
+      let text = "";
+      if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+        const pdfjs = await import("pdfjs-dist/build/pdf.mjs");
+        const pdf = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), disableWorker: true }).promise;
+        for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+          const page = await pdf.getPage(pageNumber);
+          const content = await page.getTextContent();
+          text += content.items.map(item => item.str).join(" ") + "\n";
+        }
+      } else {
+        const { createWorker } = await import("tesseract.js");
+        const worker = await createWorker("eng", 1, { logger: message => { if (message.status) setInvoiceProgress(`${message.status} ${Math.round((message.progress || 0) * 100)}%`); } });
+        const result = await worker.recognize(file);
+        text = result.data.text;
+        await worker.terminate();
+      }
+      const parsed = parseInvoiceText(text, existingSkus);
+      if (!parsed.length) throw new Error("No product-like rows were found.");
+      setInvoiceRows(parsed); setInvoiceProgress(`Found ${parsed.length} possible product row${parsed.length === 1 ? "" : "s"}. Review before importing.`);
+    } catch (e) {
+      console.error(e);
+      setError("Could not extract product rows. Try a clearer image or a PDF with selectable text.");
+      setInvoiceProgress("");
+    }
+  };
+
+  const updateInvoiceRow = (id, patch) => setInvoiceRows(rs => rs.map(r => r.id === id ? { ...r, ...patch } : r));
+  const invoiceIncludedCount = invoiceRows.filter(r => r.include && r.name.trim() && !isNaN(Number(r.unitPrice))).length;
+  const handleImportInvoice = () => {
+    const toAdd = invoiceRows.filter(r => r.include && r.name.trim() && !isNaN(Number(r.unitPrice))).map(r => ({
+      sku: r.sku.trim() || `INVOICE-${uid().toUpperCase()}`, name: r.name.trim(), category: r.category || "Other",
+      unitPrice: Math.round(Number(r.unitPrice) * 100) / 100, priceType: r.priceType || "Per Unit", packQty: Number(r.packQty) || 1
+    }));
+    if (!toAdd.length) return;
+    onAddProducts(toAdd); setSavedCount(toAdd.length); setInvoiceRows([]); setInvoiceProgress(""); setFileName("");
+  };
+
   const toggleInclude = (id) => setBulkRows(rs => rs.map(r => r.id === id ? { ...r, include: !r.include } : r));
   const includedCount = bulkRows.filter(r => r.include).length;
 
@@ -5578,7 +5633,7 @@ function AddProductsView({ products, onAddProducts }) {
       <p style={{ color: "#767c8c", fontSize: 13.5, marginTop: 5, marginBottom: 20 }}>Add new items to the product database — one at a time, several at once, or by uploading a sheet.</p>
 
       <div style={{ display: "flex", gap: 6, marginBottom: 20 }}>
-        {[["manual", "Add Manually", Pencil], ["bulk", "Bulk Upload", Upload]].map(([id, label, Icon]) => (
+        {[["manual", "Add Manually", Pencil], ["bulk", "Bulk Upload", Upload], ["invoice", "Invoice PDF / Image", FileSpreadsheet]].map(([id, label, Icon]) => (
           <button key={id} onClick={() => { setMode(id); setSavedCount(null); }}
             style={{
               display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
@@ -5731,6 +5786,47 @@ function AddProductsView({ products, onAddProducts }) {
                 }}
               >
                 Import {includedCount} Product{includedCount !== 1 ? "s" : ""}
+              </button>
+            </>
+          )}
+        </>
+      )}
+      {mode === "invoice" && (
+        <>
+          {invoiceRows.length === 0 ? (
+            <div onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); if (e.dataTransfer.files[0]) handleInvoiceFile(e.dataTransfer.files[0]); }} onClick={() => fileInputRef.current?.click()}
+              style={{ border: "2px dashed #d8dbe3", borderRadius: 12, padding: "44px 20px", textAlign: "center", cursor: "pointer", background: "#fbfbfc" }}>
+              <FileSpreadsheet size={26} color="#a3a8b8" style={{ marginBottom: 10 }} />
+              <div style={{ fontWeight: 600, fontSize: 14.5, color: "#3a3f4c" }}>Drop a supplier invoice here, or click to browse</div>
+              <div style={{ fontSize: 12, color: "#9aa0ae", marginTop: 5 }}>PDF, JPG, or PNG — extracted rows must be reviewed before saving</div>
+              <input ref={fileInputRef} type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" style={{ display: "none" }} onChange={e => e.target.files[0] && handleInvoiceFile(e.target.files[0])} />
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+                <div style={{ fontSize: 12.5, color: "#666" }}>{fileName} — {invoiceRows.length} possible rows</div>
+                <button onClick={() => { setInvoiceRows([]); setFileName(""); setInvoiceProgress(""); }} style={ghostBtn}>Start over</button>
+              </div>
+              <div style={{ background: "#fff8e1", border: "1px solid #f2df9c", borderRadius: 8, padding: "10px 12px", marginBottom: 12, color: "#765b11", fontSize: 12.5 }}>
+                Extraction can misread names, SKUs, prices, or quantities. Check every selected row before importing.
+              </div>
+              {invoiceProgress && <div style={{ color: "#767c8c", fontSize: 12, marginBottom: 10 }}>{invoiceProgress}</div>}
+              <div style={{ border: "1px solid #e8e9ee", borderRadius: 10, overflow: "auto", marginBottom: 16 }}>
+                <table style={{ width: "100%", minWidth: 820, borderCollapse: "collapse", fontSize: 12.5 }}>
+                  <thead><tr style={{ background: "#f8f8fa", textAlign: "left" }}>{["Include", "SKU", "Product Name", "Category", "Unit Price", "Pack Qty", "Status"].map(h => <th key={h} style={{ padding: "8px 10px", color: "#6b7080", fontSize: 11, textTransform: "uppercase" }}>{h}</th>)}</tr></thead>
+                  <tbody>{invoiceRows.map(r => <tr key={r.id} style={{ borderTop: "1px solid #f0f1f4" }}>
+                    <td style={{ padding: 7 }}><input type="checkbox" checked={r.include} disabled={!r.valid} onChange={() => updateInvoiceRow(r.id, { include: !r.include })} /></td>
+                    <td style={{ padding: 7 }}><input value={r.sku} onChange={e => updateInvoiceRow(r.id, { sku: e.target.value })} style={{ width: 125, padding: 5 }} /></td>
+                    <td style={{ padding: 7 }}><input value={r.name} onChange={e => updateInvoiceRow(r.id, { name: e.target.value, valid: !!e.target.value && !isNaN(Number(r.unitPrice)) })} style={{ width: 240, padding: 5 }} /></td>
+                    <td style={{ padding: 7 }}><select value={r.category} onChange={e => updateInvoiceRow(r.id, { category: e.target.value })} style={{ padding: 5 }}>{CATEGORY_OPTIONS.map(c => <option key={c}>{c}</option>)}</select></td>
+                    <td style={{ padding: 7 }}><input type="number" step="0.01" value={isNaN(r.unitPrice) ? "" : r.unitPrice} onChange={e => updateInvoiceRow(r.id, { unitPrice: e.target.value, valid: !!r.name && e.target.value !== "" && !isNaN(Number(e.target.value)) })} style={{ width: 90, padding: 5 }} /></td>
+                    <td style={{ padding: 7 }}><input type="number" min="1" value={r.packQty} onChange={e => updateInvoiceRow(r.id, { packQty: e.target.value })} style={{ width: 60, padding: 5 }} /></td>
+                    <td style={{ padding: 7 }}>{!r.valid ? <StatusPill status="unmatched" /> : r.isDuplicate ? <StatusPill status="ambiguous" /> : <StatusPill status="fuzzy" />}</td>
+                  </tr>)}</tbody>
+                </table>
+              </div>
+              <button disabled={!invoiceIncludedCount} onClick={handleImportInvoice} style={{ background: invoiceIncludedCount ? "#171a21" : "#d8dbe3", color: "#fff", border: "none", padding: "10px 20px", borderRadius: 9, fontSize: 13.5, fontWeight: 600, cursor: invoiceIncludedCount ? "pointer" : "not-allowed" }}>
+                Add {invoiceIncludedCount || ""} Approved Product{invoiceIncludedCount !== 1 ? "s" : ""}
               </button>
             </>
           )}
