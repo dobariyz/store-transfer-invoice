@@ -5,6 +5,7 @@ import {
   Upload, Package, History, LayoutDashboard, Printer, AlertTriangle,
   CheckCircle2, Search, ArrowRightLeft, X, Trash2, ChevronRight,
   FileSpreadsheet, PlusCircle, Building2, Download, ListPlus, Pencil
+  , ScanLine
 } from "lucide-react";
 
 const PRODUCTS_SEED = [
@@ -4622,6 +4623,7 @@ function Sidebar({ view, setView, stores, productCount }) {
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "products", label: "Product Database", icon: Package },
     { id: "addproducts", label: "Add Products", icon: ListPlus },
+    { id: "invoiceexcel", label: "Invoice to Excel", icon: ScanLine },
   ];
   return (
     <div data-sidebar style={{ width: 220, background: "#151922", color: "#e8e6df", display: "flex", flexDirection: "column", flexShrink: 0 }}>
@@ -5549,8 +5551,8 @@ function AddProductsView({ products, onAddProducts }) {
       const catKey = findHeaderKey(headers, ["Category"]);
       const typeKey = findHeaderKey(headers, ["Price Type"]);
       const packKey = findHeaderKey(headers, ["Pack Qty"]);
-      if (!skuKey || !nameKey || !priceKey) {
-        setError("Expected columns: SKU, Product Name, Unit Price (Category and Price Type optional).");
+      if (!nameKey || !priceKey) {
+        setError("Expected columns: Product Name and Unit Price (SKU, Category, and Price Type optional).");
         return;
       }
       const parsed = json.map(r => {
@@ -5560,7 +5562,7 @@ function AddProductsView({ products, onAddProducts }) {
         const category = catKey && r[catKey] ? String(r[catKey]).trim() : "Other";
         const priceType = typeKey && r[typeKey] ? String(r[typeKey]).trim() : "Per Unit";
         const packQty = packKey && r[packKey] ? Number(r[packKey]) : 1;
-        const valid = !!sku && !!name && !isNaN(unitPrice);
+        const valid = !!name && !isNaN(unitPrice);
         return {
           id: uid(), sku, name, category, unitPrice, priceType, packQty,
           valid, isDuplicate: existingSkus.has(sku), include: !existingSkus.has(sku) && valid,
@@ -5617,7 +5619,7 @@ function AddProductsView({ products, onAddProducts }) {
 
   const handleImportBulk = () => {
     const toAdd = bulkRows.filter(r => r.include).map(r => ({
-      sku: r.sku, name: r.name, category: r.category, unitPrice: Math.round(r.unitPrice * 100) / 100,
+      sku: r.sku || `INVOICE-${uid().toUpperCase()}`, name: r.name, category: r.category, unitPrice: Math.round(r.unitPrice * 100) / 100,
       priceType: r.priceType, packQty: r.packQty || 1
     }));
     if (toAdd.length === 0) return;
@@ -5837,6 +5839,70 @@ function AddProductsView({ products, onAddProducts }) {
   );
 }
 
+function InvoiceToExcelView() {
+  const [rows, setRows] = useState([]);
+  const [fileName, setFileName] = useState("");
+  const [progress, setProgress] = useState("");
+  const [error, setError] = useState("");
+  const inputRef = useRef(null);
+
+  const readInvoice = async (file) => {
+    setError(""); setRows([]); setFileName(file.name); setProgress("Reading invoice...");
+    try {
+      let text = "";
+      if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+        const pdfjs = await import("pdfjs-dist/build/pdf.mjs");
+        const pdf = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), disableWorker: true }).promise;
+        for (let n = 1; n <= pdf.numPages; n++) {
+          const page = await pdf.getPage(n);
+          text += (await page.getTextContent()).items.map(item => item.str).join(" ") + "\n";
+        }
+      } else {
+        const { createWorker } = await import("tesseract.js");
+        const worker = await createWorker("eng", 1, { logger: m => { if (m.status) setProgress(`${m.status} ${Math.round((m.progress || 0) * 100)}%`); } });
+        try { text = (await worker.recognize(file)).data.text; } finally { await worker.terminate(); }
+      }
+      const parsed = parseInvoiceText(text, new Set()).filter(r => r.valid).map(r => ({ id: r.id, name: r.name, price: Number(r.unitPrice) }));
+      if (!parsed.length) throw new Error("No product rows found");
+      setRows(parsed); setProgress(`Found ${parsed.length} possible product row${parsed.length === 1 ? "" : "s"}. Review the names and prices before exporting.`);
+    } catch (e) {
+      console.error(e); setError("Could not extract product rows. Try a clearer image or a PDF with selectable text."); setProgress("");
+    }
+  };
+  const updateRow = (id, patch) => setRows(rs => rs.map(r => r.id === id ? { ...r, ...patch } : r));
+  const exportRows = rows.filter(r => r.name.trim() && Number.isFinite(Number(r.price)));
+  const download = () => exportToExcel("invoice_products.xlsx", [{ name: "Products", rows: exportRows.map(r => ({ "Product Name": r.name.trim(), "Unit Price": Number(r.price) })) }]);
+
+  return <div style={{ padding: "28px 36px", maxWidth: 980 }}>
+    <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 24, fontWeight: 700, margin: 0, color: "#171a21" }}>Invoice to Excel</h1>
+    <p style={{ color: "#767c8c", fontSize: 13.5, marginTop: 5, marginBottom: 20 }}>Upload an invoice photo or PDF, review the extracted product names and prices, then download a sheet for Add Products.</p>
+    {!rows.length ? <div onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); if (e.dataTransfer.files[0]) readInvoice(e.dataTransfer.files[0]); }} onClick={() => inputRef.current?.click()}
+      style={{ border: "2px dashed #d8dbe3", borderRadius: 12, padding: "44px 20px", textAlign: "center", cursor: "pointer", background: "#fbfbfc" }}>
+      <ScanLine size={26} color="#a3a8b8" style={{ marginBottom: 10 }} />
+      <div style={{ fontWeight: 600, fontSize: 14.5, color: "#3a3f4c" }}>Drop an invoice image here, or click to browse</div>
+      <div style={{ fontSize: 12, color: "#9aa0ae", marginTop: 5 }}>PDF, JPG, or PNG</div>
+      <input ref={inputRef} type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" style={{ display: "none" }} onChange={e => e.target.files[0] && readInvoice(e.target.files[0])} />
+    </div> : <>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div style={{ fontSize: 12.5, color: "#666" }}>{fileName} — {rows.length} possible rows</div>
+        <button onClick={() => { setRows([]); setFileName(""); setProgress(""); if (inputRef.current) inputRef.current.value = ""; }} style={ghostBtn}>Start over</button>
+      </div>
+      <div style={{ background: "#fff8e1", border: "1px solid #f2df9c", borderRadius: 8, padding: "10px 12px", marginBottom: 12, color: "#765b11", fontSize: 12.5 }}>OCR can misread text and prices. Verify every row before downloading.</div>
+      <div style={{ color: "#767c8c", fontSize: 12, marginBottom: 10 }}>{progress}</div>
+      <div style={{ border: "1px solid #e8e9ee", borderRadius: 10, overflow: "hidden", marginBottom: 16 }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+        <thead><tr style={{ background: "#f8f8fa", textAlign: "left" }}>{["Product Name", "Price"].map(h => <th key={h} style={{ padding: "8px 10px", color: "#6b7080", fontSize: 11, textTransform: "uppercase" }}>{h}</th>)}</tr></thead>
+        <tbody>{rows.map(r => <tr key={r.id} style={{ borderTop: "1px solid #f0f1f4" }}>
+          <td style={{ padding: 7 }}><input value={r.name} onChange={e => updateRow(r.id, { name: e.target.value })} style={{ width: "90%", padding: 6 }} /></td>
+          <td style={{ padding: 7 }}><input type="number" min="0" step="0.01" value={Number.isFinite(Number(r.price)) ? r.price : ""} onChange={e => updateRow(r.id, { price: e.target.value })} style={{ width: 120, padding: 6 }} /></td>
+        </tr>)}</tbody>
+      </table></div>
+      <button disabled={!exportRows.length} onClick={download} style={{ background: exportRows.length ? "#171a21" : "#d8dbe3", color: "#fff", border: "none", padding: "10px 18px", borderRadius: 9, fontSize: 13, fontWeight: 600, cursor: exportRows.length ? "pointer" : "not-allowed", display: "inline-flex", alignItems: "center", gap: 7 }}><Download size={15} /> Download Excel for Add Products</button>
+    </>}
+    {progress && !rows.length && <div style={{ color: "#767c8c", fontSize: 12, marginTop: 10 }}>{progress}</div>}
+    {error && <div style={{ color: "#a5202a", fontSize: 12.5, marginTop: 12 }}>{error}</div>}
+  </div>;
+}
+
 export default function StoreTransferApp() {
   const [view, setView] = useState("new");
   const [stores] = useState(DEFAULT_STORES);
@@ -5947,6 +6013,7 @@ export default function StoreTransferApp() {
         {view === "dashboard" && <DashboardView transfers={transfers} stores={stores} />}
         {view === "products" && <ProductsView products={products} onUpdateProduct={handleUpdateProduct} />}
         {view === "addproducts" && <AddProductsView products={products} onAddProducts={handleAddProducts} />}
+        {view === "invoiceexcel" && <InvoiceToExcelView />}
       </div>
     </div>
   );
