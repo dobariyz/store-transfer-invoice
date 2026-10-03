@@ -5844,29 +5844,28 @@ function InvoiceToExcelView() {
   const [fileName, setFileName] = useState("");
   const [progress, setProgress] = useState("");
   const [error, setError] = useState("");
+  const [model, setModel] = useState("prebuilt-invoice");
   const inputRef = useRef(null);
 
   const readInvoice = async (file) => {
     setError(""); setRows([]); setFileName(file.name); setProgress("Reading invoice...");
     try {
-      let text = "";
-      if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
-        const pdfjs = await import("pdfjs-dist/build/pdf.mjs");
-        const pdf = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), disableWorker: true }).promise;
-        for (let n = 1; n <= pdf.numPages; n++) {
-          const page = await pdf.getPage(n);
-          text += (await page.getTextContent()).items.map(item => item.str).join(" ") + "\n";
-        }
-      } else {
-        const { createWorker } = await import("tesseract.js");
-        const worker = await createWorker("eng", 1, { logger: m => { if (m.status) setProgress(`${m.status} ${Math.round((m.progress || 0) * 100)}%`); } });
-        try { text = (await worker.recognize(file)).data.text; } finally { await worker.terminate(); }
-      }
-      const parsed = parseInvoiceText(text, new Set()).filter(r => r.valid).map(r => ({ id: r.id, name: r.name, price: Number(r.unitPrice) }));
+      const buffer = await file.arrayBuffer();
+      let binary = "";
+      const bytes = new Uint8Array(buffer);
+      for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+      setProgress("Analyzing invoice with Azure...");
+      const response = await fetch("/api/invoice-scan", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileName: file.name, mimeType: file.type, base64: btoa(binary), model }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Azure could not analyze this file.");
+      const parsed = (result.items || []).map(r => ({ id: uid(), name: String(r.name || ""), price: Number(r.price) })).filter(r => r.name && Number.isFinite(r.price));
       if (!parsed.length) throw new Error("No product rows found");
-      setRows(parsed); setProgress(`Found ${parsed.length} possible product row${parsed.length === 1 ? "" : "s"}. Review the names and prices before exporting.`);
+      setRows(parsed); setProgress(`Azure found ${parsed.length} possible product row${parsed.length === 1 ? "" : "s"}. Review the names and prices before exporting.`);
     } catch (e) {
-      console.error(e); setError("Could not extract product rows. Try a clearer image or a PDF with selectable text."); setProgress("");
+      console.error(e); setError(e.message || "Could not extract product rows. Try a clearer image or PDF."); setProgress("");
     }
   };
   const updateRow = (id, patch) => setRows(rs => rs.map(r => r.id === id ? { ...r, ...patch } : r));
@@ -5876,11 +5875,14 @@ function InvoiceToExcelView() {
   return <div style={{ padding: "28px 36px", maxWidth: 980 }}>
     <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 24, fontWeight: 700, margin: 0, color: "#171a21" }}>Invoice to Excel</h1>
     <p style={{ color: "#767c8c", fontSize: 13.5, marginTop: 5, marginBottom: 20 }}>Upload an invoice photo or PDF, review the extracted product names and prices, then download a sheet for Add Products.</p>
+    <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+      {[ ["prebuilt-invoice", "Invoice model"], ["prebuilt-receipt", "Receipt model"] ].map(([id, label]) => <button key={id} onClick={() => setModel(id)} style={{ padding: "7px 12px", borderRadius: 7, border: model === id ? "1px solid #171a21" : "1px solid #e8e9ee", background: model === id ? "#171a21" : "#fff", color: model === id ? "#fff" : "#3a3f4c", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>{label}</button>)}
+    </div>
     {!rows.length ? <div onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); if (e.dataTransfer.files[0]) readInvoice(e.dataTransfer.files[0]); }} onClick={() => inputRef.current?.click()}
       style={{ border: "2px dashed #d8dbe3", borderRadius: 12, padding: "44px 20px", textAlign: "center", cursor: "pointer", background: "#fbfbfc" }}>
       <ScanLine size={26} color="#a3a8b8" style={{ marginBottom: 10 }} />
       <div style={{ fontWeight: 600, fontSize: 14.5, color: "#3a3f4c" }}>Drop an invoice image here, or click to browse</div>
-      <div style={{ fontSize: 12, color: "#9aa0ae", marginTop: 5 }}>PDF, JPG, or PNG</div>
+      <div style={{ fontSize: 12, color: "#9aa0ae", marginTop: 5 }}>PDF, JPG, or PNG — up to 4 MB. Scanned securely using the selected Azure model.</div>
       <input ref={inputRef} type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" style={{ display: "none" }} onChange={e => e.target.files[0] && readInvoice(e.target.files[0])} />
     </div> : <>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>

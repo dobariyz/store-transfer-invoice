@@ -21,6 +21,15 @@ Run `npm run build`. Upload the contents of `dist/` to any static host, or conne
 2. Railway will use `pnpm run build` and then `pnpm run start` from `railway.toml`.
 3. In Railway, generate a public domain after the first deployment.
 
+### Azure invoice scanning
+
+The Invoice to Excel tab uses Azure Document Intelligence's prebuilt Invoice or Receipt model. In Railway, add these service variables after creating a Document Intelligence resource:
+
+- `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`: the resource endpoint from **Keys and Endpoint**.
+- `AZURE_DOCUMENT_INTELLIGENCE_KEY`: either resource key. Keep this value in Railway variables; do not add it to frontend `VITE_` variables or commit it to Git.
+
+The scan endpoint accepts PDF, JPG, and PNG files up to 4 MB. Uploads are analyzed in memory and are not saved by this app. Azure's F0 tier currently includes up to 500 pages per month.
+
 ## Data storage
 
 The deployed app stores its product list and transfer history in the browser's local storage. It works without a backend, but data is private to that browser and will not sync between the Dixie and Vaughan devices. Before production use across multiple users or devices, add authentication and a shared database.
