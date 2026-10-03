@@ -5556,16 +5556,18 @@ function AddProductsView({ products, onAddProducts }) {
         return;
       }
       const parsed = json.map(r => {
-        const sku = String(r[skuKey]).trim();
-        const name = String(r[nameKey]).trim();
-        const unitPrice = Number(r[priceKey]);
+        const sku = skuKey && r[skuKey] != null ? String(r[skuKey]).trim() : "";
+        const name = r[nameKey] == null ? "" : String(r[nameKey]).trim();
+        const rawPrice = r[priceKey];
+        const unitPrice = rawPrice === "" || rawPrice == null ? NaN : Number(rawPrice);
         const category = catKey && r[catKey] ? String(r[catKey]).trim() : "Other";
         const priceType = typeKey && r[typeKey] ? String(r[typeKey]).trim() : "Per Unit";
         const packQty = packKey && r[packKey] ? Number(r[packKey]) : 1;
-        const valid = !!name && !isNaN(unitPrice);
+        const valid = !!name && Number.isFinite(unitPrice) && unitPrice >= 0;
+        const isDuplicate = !!sku && existingSkus.has(sku);
         return {
           id: uid(), sku, name, category, unitPrice, priceType, packQty,
-          valid, isDuplicate: existingSkus.has(sku), include: !existingSkus.has(sku) && valid,
+          valid, isDuplicate, include: valid && !isDuplicate,
         };
       });
       setBulkRows(parsed);
