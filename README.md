@@ -32,7 +32,16 @@ The scan endpoint accepts PDF, JPG, and PNG files up to 4 MB. Uploads are analyz
 
 ## Data storage
 
-The deployed app stores its product list and transfer history in the browser's local storage. It works without a backend, but data is private to that browser and will not sync between the Dixie and Vaughan devices. Before production use across multiple users or devices, add authentication and a shared database.
+The app can store products and transfer history in Supabase so they are shared across browsers and devices. Without Supabase settings, it falls back to browser-local storage.
+
+### Supabase shared data setup
+
+1. In Supabase Authentication settings, disable public sign-ups. Add one account per staff member under **Authentication → Users**.
+2. In **SQL Editor**, run [`supabase/shared-data-policies.sql`](supabase/shared-data-policies.sql). It enables access only for signed-in users and keeps Row Level Security enabled.
+3. In Railway service variables, add `VITE_SUPABASE_URL` (the project URL) and `VITE_SUPABASE_PUBLISHABLE_KEY` (from the Supabase Connect dialog or API Keys page). These are read during the build, so redeploy after setting them.
+4. Sign in to the app with a staff account. Products, transfers, transfer items, and reconciliation links will then use the shared database.
+
+Do not put a Supabase secret or `service_role` key in a `VITE_` variable or frontend code. Existing records in browser-local storage are not automatically merged into Supabase; export and merge those records before treating the shared database as the complete history.
 
 ## Input sheets
 

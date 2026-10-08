@@ -4484,11 +4484,18 @@ function money(n) {
   return "$" + (Number(n) || 0).toLocaleString("en-CA", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+let supabaseClient;
+function getSupabaseClient() {
+  const url = import.meta.env.VITE_SUPABASE_URL;
+  const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || import.meta.env.VITE_SUPABASE_ANON_KEY;
+  if (!url || !key) return null;
+  if (!supabaseClient) supabaseClient = createClient(url, key);
+  return supabaseClient;
+}
+
 async function loadTransfers() {
   try {
-    const SUPA_URL = import.meta.env.VITE_SUPABASE_URL;
-    const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
-    const supabase = SUPA_URL && SUPA_KEY ? createClient(SUPA_URL, SUPA_KEY) : null;
+    const supabase = getSupabaseClient();
     if (supabase) {
       // load transfers and their items from Supabase
       const { data: tdata, error: terr } = await supabase.from('transfers').select('*').order('date', { ascending: true });
@@ -4511,15 +4518,14 @@ async function loadTransfers() {
     return JSON.parse(window.localStorage.getItem("store-transfer:transfers") || "[]");
   } catch (e) {
     console.error('loadTransfers error', e);
+    if (getSupabaseClient()) throw e;
     return [];
   }
 }
 
 async function saveTransfers(transfers) {
   try {
-    const SUPA_URL = import.meta.env.VITE_SUPABASE_URL;
-    const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
-    const supabase = SUPA_URL && SUPA_KEY ? createClient(SUPA_URL, SUPA_KEY) : null;
+    const supabase = getSupabaseClient();
     if (supabase) {
       // upsert transfers and transfer_items
       for (const t of transfers) {
@@ -4561,9 +4567,7 @@ async function saveTransfers(transfers) {
 
 async function loadProducts() {
   try {
-    const SUPA_URL = import.meta.env.VITE_SUPABASE_URL;
-    const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
-    const supabase = SUPA_URL && SUPA_KEY ? createClient(SUPA_URL, SUPA_KEY) : null;
+    const supabase = getSupabaseClient();
     if (supabase) {
       const { data, error } = await supabase.from('products').select('*').order('sku', { ascending: true });
       if (error) throw error;
@@ -4577,15 +4581,14 @@ async function loadProducts() {
     return JSON.parse(window.localStorage.getItem("store-transfer:products") || "null");
   } catch (e) {
     console.error('loadProducts error', e);
+    if (getSupabaseClient()) throw e;
     return null;
   }
 }
 
 async function saveProducts(products) {
   try {
-    const SUPA_URL = import.meta.env.VITE_SUPABASE_URL;
-    const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
-    const supabase = SUPA_URL && SUPA_KEY ? createClient(SUPA_URL, SUPA_KEY) : null;
+    const supabase = getSupabaseClient();
     if (supabase) {
       const toUpsert = products.map(p => ({ sku: p.sku, name: p.name, category: p.category, subcategory: p.subcategory || null, unit_price: p.unitPrice, price_type: p.priceType, pack_qty: p.packQty || null, pack_price: p.packPrice || null, metadata: p.metadata || null, created_at: p.createdAt || new Date().toISOString() }));
       const { error } = await supabase.from('products').upsert(toUpsert);
@@ -4615,7 +4618,7 @@ const FONT_IMPORT = `
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap');
 `;
 
-function Sidebar({ view, setView, stores, productCount }) {
+function Sidebar({ view, setView, stores, productCount, userEmail, onSignOut, onMergeLocalData, mergeStatus }) {
   const items = [
     { id: "new", label: "New Transfer", icon: ArrowRightLeft },
     { id: "reconcile", label: "Reconcile", icon: CheckCircle2 },
@@ -4660,6 +4663,12 @@ function Sidebar({ view, setView, stores, productCount }) {
       </div>
       <div style={{ padding: "14px 20px", borderTop: "1px solid #262c3a", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: "#5b6172" }}>
         {productCount} SKUs loaded
+        {userEmail && <div style={{ marginTop: 10, overflowWrap: "anywhere", color: "#9aa0ae", fontFamily: "'Inter', sans-serif", fontSize: 11 }}>
+          <div style={{ marginBottom: 7 }}>{userEmail}</div>
+          <button onClick={onMergeLocalData} style={{ display: "block", width: "100%", marginBottom: 7, background: "transparent", border: "1px solid #424858", color: "#c3c7d1", borderRadius: 6, padding: "6px 8px", fontSize: 10.5, cursor: "pointer" }}>Merge this browser’s saved data</button>
+          {mergeStatus && <div style={{ marginBottom: 8, lineHeight: 1.4, color: mergeStatus.startsWith("Could") ? "#f0a4a4" : "#a9d7b7" }}>{mergeStatus}</div>}
+          <button onClick={onSignOut} style={{ background: "transparent", border: "1px solid #424858", color: "#c3c7d1", borderRadius: 6, padding: "5px 8px", fontSize: 11, cursor: "pointer" }}>Sign out</button>
+        </div>}
       </div>
     </div>
   );
@@ -5907,6 +5916,33 @@ function InvoiceToExcelView() {
   </div>;
 }
 
+function SupabaseLogin({ supabase }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const handleSubmit = async (event) => {
+    event.preventDefault(); setError(""); setBusy(true);
+    const { error: signInError } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    setBusy(false);
+    if (signInError) setError(signInError.message || "Sign in failed. Check your email and password.");
+  };
+  return <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#f6f7f9", padding: 20, fontFamily: "'Inter', sans-serif" }}>
+    <form onSubmit={handleSubmit} style={{ width: "100%", maxWidth: 390, background: "#fff", border: "1px solid #e8e9ee", borderRadius: 14, padding: 28, boxShadow: "0 12px 35px #171a2110" }}>
+      <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 23, fontWeight: 700, color: "#171a21" }}>Store<span style={{ color: "#e8a33d" }}>Transfer</span></div>
+      <h1 style={{ fontSize: 18, margin: "22px 0 5px", color: "#171a21" }}>Sign in</h1>
+      <p style={{ color: "#767c8c", fontSize: 13, lineHeight: 1.5, margin: "0 0 18px" }}>Use a staff account invited by your Supabase project administrator.</p>
+      <label style={{ display: "block", fontSize: 12, fontWeight: 600, marginBottom: 6, color: "#4d5361" }}>Work email</label>
+      <input type="email" autoComplete="username" required value={email} onChange={e => setEmail(e.target.value)} style={{ width: "100%", padding: "10px 11px", border: "1px solid #d8dbe3", borderRadius: 7, fontSize: 14, marginBottom: 14 }} />
+      <label style={{ display: "block", fontSize: 12, fontWeight: 600, marginBottom: 6, color: "#4d5361" }}>Password</label>
+      <input type="password" autoComplete="current-password" required value={password} onChange={e => setPassword(e.target.value)} style={{ width: "100%", padding: "10px 11px", border: "1px solid #d8dbe3", borderRadius: 7, fontSize: 14, marginBottom: 16 }} />
+      {error && <div role="alert" style={{ color: "#a5202a", fontSize: 12, marginBottom: 12 }}>{error}</div>}
+      <button type="submit" disabled={busy} style={{ width: "100%", background: busy ? "#7a7f89" : "#171a21", color: "#fff", border: 0, borderRadius: 8, padding: 11, fontSize: 13.5, fontWeight: 600, cursor: busy ? "wait" : "pointer" }}>{busy ? "Signing in…" : "Sign in"}</button>
+      <p style={{ color: "#9aa0ae", fontSize: 11.5, lineHeight: 1.5, margin: "14px 0 0" }}>No public sign-up is available. Ask the administrator to create your staff account.</p>
+    </form>
+  </div>;
+}
+
 export default function StoreTransferApp() {
   const [view, setView] = useState("new");
   const [stores] = useState(DEFAULT_STORES);
@@ -5914,19 +5950,51 @@ export default function StoreTransferApp() {
   const [products, setProducts] = useState(PRODUCTS_SEED);
   const [loading, setLoading] = useState(true);
   const [transferToEdit, setTransferToEdit] = useState(null);
+  const [supabase] = useState(() => getSupabaseClient());
+  const [session, setSession] = useState(null);
+  const [authReady, setAuthReady] = useState(!supabase);
+  const [dataError, setDataError] = useState("");
+  const [reloadCount, setReloadCount] = useState(0);
+  const [mergeStatus, setMergeStatus] = useState("");
 
   useEffect(() => {
+    if (!supabase) return undefined;
+    let active = true;
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (!active) return;
+      if (error) console.error("Supabase session check failed", error);
+      setSession(data?.session || null);
+      setAuthReady(true);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setAuthReady(true);
+    });
+    return () => { active = false; subscription.unsubscribe(); };
+  }, [supabase]);
+
+  useEffect(() => {
+    if (supabase && !authReady) return;
+    if (supabase && !session) {
+      setTransfers([]); setProducts(PRODUCTS_SEED); setLoading(false);
+      return;
+    }
+    setLoading(true); setDataError("");
     Promise.all([loadTransfers(), loadProducts()]).then(([t, p]) => {
       setTransfers(t);
       if (Array.isArray(p) && p.length) {
         setProducts(p);
       } else {
         setProducts(PRODUCTS_SEED);
-        saveProducts(PRODUCTS_SEED);
+        if (!supabase) saveProducts(PRODUCTS_SEED);
       }
       setLoading(false);
+    }).catch(error => {
+      console.error("Could not load shared Supabase data", error);
+      setDataError(error.message || "Check your Supabase connection and access policies.");
+      setLoading(false);
     });
-  }, []);
+  }, [supabase, authReady, session?.user?.id, reloadCount]);
 
   const handleCreateTransfer = useCallback((t) => {
     setTransfers(prev => {
@@ -5990,6 +6058,108 @@ export default function StoreTransferApp() {
     });
   }, []);
 
+  const handleMergeLocalData = useCallback(async () => {
+    if (!supabase) return;
+    setMergeStatus("");
+    try {
+      const readStored = async (key, fallback) => {
+        if (window.storage?.get) {
+          const result = await window.storage.get(key, true);
+          if (result?.value) return JSON.parse(result.value);
+        }
+        return JSON.parse(window.localStorage.getItem(`store-transfer:${key}`) || JSON.stringify(fallback));
+      };
+      const localProducts = await readStored("products", []);
+      const localTransfers = await readStored("transfers", []);
+      if (!localProducts.length && !localTransfers.length) {
+        setMergeStatus("No saved data found in this browser.");
+        return;
+      }
+      const confirmMessage = `Merge this browser’s ${localProducts.length} products and ${localTransfers.length} transfers into the shared database? Existing product SKUs and transfer IDs will be kept; duplicates won’t overwrite shared records.`;
+      if (!window.confirm(confirmMessage)) return;
+      setMergeStatus("Merging local records…");
+
+      const { data: sharedProducts, error: productReadError } = await supabase.from("products").select("sku");
+      if (productReadError) throw productReadError;
+      const sharedSkus = new Set((sharedProducts || []).map(p => p.sku));
+      const productsToInsert = localProducts.filter(p => p?.sku && !sharedSkus.has(p.sku)).map(p => ({
+        sku: p.sku, name: p.name, category: p.category, subcategory: p.subcategory || null,
+        unit_price: p.unitPrice, price_type: p.priceType || "Per Unit", pack_qty: p.packQty || null,
+        pack_price: p.packPrice || null, metadata: p.metadata || null, created_at: p.createdAt || new Date().toISOString(),
+      }));
+      if (!sharedProducts?.length && !localProducts.length) {
+        productsToInsert.push(...PRODUCTS_SEED.map(p => ({ sku: p.sku, name: p.name, category: p.category, subcategory: p.subcategory || null, unit_price: p.unitPrice, price_type: p.priceType || "Per Unit", pack_qty: p.packQty || null, pack_price: p.packPrice || null, metadata: p.metadata || null, created_at: new Date().toISOString() })));
+      }
+      if (productsToInsert.length) {
+        const { error } = await supabase.from("products").insert(productsToInsert);
+        if (error) throw error;
+      }
+
+      const { data: sharedTransfers, error: transferReadError } = await supabase.from("transfers").select("id, reconciled_with");
+      if (transferReadError) throw transferReadError;
+      const existingTransfers = new Map((sharedTransfers || []).map(t => [t.id, t]));
+      const transfersToInsert = localTransfers.filter(t => t?.id && !existingTransfers.has(t.id));
+      const transferRows = transfersToInsert.map(t => ({
+        id: t.id, date: t.date, from_store: t.fromStore, to_store: t.toStore, notes: t.notes,
+        subtotal: t.subtotal, hst: t.hst, total: t.total, created_at: t.createdAt || new Date().toISOString(),
+        reconciled_with: t.reconciledWith || null, raw: t.raw || t,
+      }));
+      for (let offset = 0; offset < transferRows.length; offset += 500) {
+        const { error } = await supabase.from("transfers").insert(transferRows.slice(offset, offset + 500));
+        if (error) throw error;
+      }
+      const existingItemCounts = new Map();
+      const transferIds = localTransfers.map(t => t?.id).filter(Boolean);
+      for (let idOffset = 0; idOffset < transferIds.length; idOffset += 100) {
+        const idBatch = transferIds.slice(idOffset, idOffset + 100);
+        let pageOffset = 0;
+        while (true) {
+          const { data, error } = await supabase.from("transfer_items")
+            .select("transfer_id, sku, name, qty, unit_price, line_total")
+            .in("transfer_id", idBatch).range(pageOffset, pageOffset + 999);
+          if (error) throw error;
+          for (const item of data || []) {
+            const signature = JSON.stringify([item.transfer_id, item.sku || "", item.name || "", Number(item.qty) || 0, Number(item.unit_price) || 0, Number(item.line_total) || 0]);
+            existingItemCounts.set(signature, (existingItemCounts.get(signature) || 0) + 1);
+          }
+          if (!data || data.length < 1000) break;
+          pageOffset += 1000;
+        }
+      }
+      const items = [];
+      for (const transfer of localTransfers) {
+        for (const item of transfer.items || []) {
+          const row = {
+            transfer_id: transfer.id, sku: item.sku || null, name: item.name, category: item.category || null,
+            qty: item.qty, unit_price: item.unitPrice, line_total: item.lineTotal, metadata: item.metadata || null,
+          };
+          const signature = JSON.stringify([row.transfer_id, row.sku || "", row.name || "", Number(row.qty) || 0, Number(row.unit_price) || 0, Number(row.line_total) || 0]);
+          const existingCount = existingItemCounts.get(signature) || 0;
+          if (existingCount) existingItemCounts.set(signature, existingCount - 1);
+          else items.push(row);
+        }
+      }
+      for (let offset = 0; offset < items.length; offset += 500) {
+        const { error } = await supabase.from("transfer_items").insert(items.slice(offset, offset + 500));
+        if (error) throw error;
+      }
+      for (const transfer of localTransfers) {
+        const existing = existingTransfers.get(transfer.id);
+        if (!existing || !Array.isArray(transfer.reconciledWith)) continue;
+        const merged = Array.from(new Set([...(Array.isArray(existing.reconciled_with) ? existing.reconciled_with : []), ...transfer.reconciledWith]));
+        if (merged.length !== (existing.reconciled_with || []).length) {
+          const { error } = await supabase.from("transfers").update({ reconciled_with: merged }).eq("id", transfer.id);
+          if (error) throw error;
+        }
+      }
+      setMergeStatus(`Done: added ${productsToInsert.length} products and ${transfersToInsert.length} transfers. ${Math.max(0, localProducts.length - productsToInsert.length)} existing product SKUs and ${Math.max(0, localTransfers.length - transfersToInsert.length)} transfer IDs were preserved.`);
+      setReloadCount(n => n + 1);
+    } catch (error) {
+      console.error("Local data merge failed", error);
+      setMergeStatus(`Could not merge: ${error.message || "Check the Supabase tables and policies."}`);
+    }
+  }, [supabase]);
+
   const handleEditTransfer = useCallback((transfer) => {
     setTransferToEdit(transfer);
     setView("new");
@@ -6000,6 +6170,10 @@ export default function StoreTransferApp() {
     setView(nextView);
   }, []);
 
+  if (supabase && !authReady) return <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", color: "#767c8c", fontFamily: "'Inter', sans-serif" }}>Checking your sign-in…</div>;
+  if (supabase && !session) return <SupabaseLogin supabase={supabase} />;
+  if (dataError) return <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#f6f7f9", padding: 20, fontFamily: "'Inter', sans-serif" }}><div style={{ maxWidth: 520, background: "#fff", border: "1px solid #f0caca", borderRadius: 12, padding: 24 }}><h1 style={{ fontSize: 18, marginTop: 0, color: "#a5202a" }}>Couldn’t load shared data</h1><p style={{ color: "#4d5361", fontSize: 13, lineHeight: 1.6 }}>{dataError}</p><p style={{ color: "#767c8c", fontSize: 12, lineHeight: 1.5 }}>The app stopped here to avoid showing an empty history or replacing shared products with starter data.</p><div style={{ display: "flex", gap: 8 }}><button onClick={() => setReloadCount(n => n + 1)} style={{ background: "#171a21", color: "#fff", border: 0, borderRadius: 7, padding: "9px 13px", fontWeight: 600, cursor: "pointer" }}>Try again</button><button onClick={() => supabase?.auth.signOut()} style={{ background: "#fff", color: "#3a3f4c", border: "1px solid #d8dbe3", borderRadius: 7, padding: "9px 13px", cursor: "pointer" }}>Sign out</button></div></div></div>;
+
   return (
     <div style={{ display: "flex", height: "100%", minHeight: 640, background: "#fff", fontFamily: "'Inter', sans-serif", color: "#171a21" }}>
       <style>{FONT_IMPORT}{`
@@ -6009,7 +6183,7 @@ export default function StoreTransferApp() {
           .no-print, aside, [data-sidebar] { display: none !important; }
         }
       `}</style>
-      <Sidebar view={view} setView={handleViewChange} stores={stores} productCount={products.length} />
+      <Sidebar view={view} setView={handleViewChange} stores={stores} productCount={products.length} userEmail={session?.user?.email} onSignOut={() => supabase?.auth.signOut()} onMergeLocalData={handleMergeLocalData} mergeStatus={mergeStatus} />
       <div style={{ flex: 1, overflowY: "auto" }}>
         {view === "new" && <NewTransferView key={transferToEdit?.id || "new"} stores={stores} products={products} onCreateTransfer={handleCreateTransfer} initialTransfer={transferToEdit} />}
         {view === "reconcile" && <ReconcileView transfers={transfers} products={products} stores={stores} onCreateTransfers={handleCreateMultipleTransfers} onMarkTransfers={handleMarkTransfers} />}
