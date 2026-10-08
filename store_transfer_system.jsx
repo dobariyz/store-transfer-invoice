@@ -4740,6 +4740,7 @@ function StatusPill({ status }) {
     matched: { bg: "#effaf3", text: "#166534", label: "Matched" },
     fuzzy: { bg: "#fff8e1", text: "#8a6116", label: "Fuzzy match — verify" },
     ambiguous: { bg: "#fff8e1", text: "#8a6116", label: "Duplicate SKU — verify" },
+    replace: { bg: "#eaf2ff", text: "#1d4ed8", label: "Existing SKU — will replace" },
     unmatched: { bg: "#fdf2f2", text: "#a5202a", label: "Not found" },
   };
   const m = map[status] || map.unmatched;
@@ -5631,7 +5632,7 @@ function AddProductsView({ products, onAddProducts }) {
         const isDuplicate = !!sku && existingSkus.has(sku);
         return {
           id: uid(), sku, name, category, sheetCategory, unitPrice, priceType, packQty,
-          valid, isDuplicate, include: valid && !isDuplicate,
+          valid, isDuplicate, include: valid,
         };
       });
       setBulkRows(parsed);
@@ -5857,7 +5858,7 @@ function AddProductsView({ products, onAddProducts }) {
                         <td style={{ padding: "7px 10px" }}><select value={r.priceType} onChange={e => updateBulkRow(r.id, { priceType: e.target.value })} aria-label={`Price type for ${r.name}`} style={{ padding: 5, border: "1px solid #ddd", borderRadius: 5 }}><option value="Per Unit">Unit</option><option value="Pack Price">Pack</option></select></td>
                         <td style={{ padding: "7px 10px" }}><input type="number" min="1" step="1" value={r.packQty} onChange={e => updateBulkRow(r.id, { packQty: e.target.value })} aria-label={`Pack quantity for ${r.name}`} style={{ width: 70, padding: 5, border: "1px solid #ddd", borderRadius: 5 }} /></td>
                         <td style={{ padding: "7px 10px" }}>
-                          {!r.valid ? <StatusPill status="unmatched" /> : r.isDuplicate ? <StatusPill status="ambiguous" /> : <StatusPill status="matched" />}
+                          {!r.valid ? <StatusPill status="unmatched" /> : r.isDuplicate ? <StatusPill status="replace" /> : <StatusPill status="matched" />}
                         </td>
                       </tr>
                     ))}
