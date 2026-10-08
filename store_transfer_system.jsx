@@ -4515,7 +4515,7 @@ async function loadTransfers() {
         itemsById[it.transfer_id] = itemsById[it.transfer_id] || [];
         itemsById[it.transfer_id].push({ sku: it.sku, name: it.name, category: it.category, qty: it.qty, unitPrice: it.unit_price ?? it.unitPrice, lineTotal: it.line_total ?? it.lineTotal, metadata: it.metadata });
       });
-      return tdata.map(t => ({ id: t.id, date: t.date, fromStore: t.from_store || t.fromStore, toStore: t.to_store || t.toStore, notes: t.notes, subtotal: t.subtotal, hst: t.hst, total: t.total, createdAt: t.created_at, reconciledWith: t.reconciled_with, raw: t.raw, items: itemsById[t.id] || [] }));
+      return tdata.filter(t => t.raw?.__app_deleted !== true).map(t => ({ id: t.id, date: t.date, fromStore: t.from_store || t.fromStore, toStore: t.to_store || t.toStore, notes: t.notes, subtotal: t.subtotal, hst: t.hst, total: t.total, createdAt: t.created_at, reconciledWith: t.reconciled_with, raw: t.raw, items: itemsById[t.id] || [] }));
     }
     if (window.storage?.get) {
       const res = await window.storage.get("transfers", true);
@@ -4534,7 +4534,14 @@ async function saveTransfers(transfers) {
     const supabase = getSupabaseClient();
     if (supabase) {
       // upsert transfers and transfer_items
+      const transferIds = transfers.map(t => t.id).filter(Boolean);
+      const { data: existingRows, error: readError } = transferIds.length
+        ? await supabase.from("transfers").select("id, raw").in("id", transferIds)
+        : { data: [], error: null };
+      if (readError) throw readError;
+      const deletedIds = new Set((existingRows || []).filter(row => row.raw?.__app_deleted === true).map(row => row.id));
       for (const t of transfers) {
+        if (deletedIds.has(t.id)) continue;
         const up = {
           id: t.id,
           date: t.date,
@@ -4568,6 +4575,40 @@ async function saveTransfers(transfers) {
     window.localStorage.setItem("store-transfer:transfers", JSON.stringify(transfers));
   } catch (e) {
     console.error("Failed to save transfers", e);
+  }
+}
+
+async function deleteTransferFromStorage(transfer) {
+  const supabase = getSupabaseClient();
+  if (supabase) {
+    const { data: existing, error: readError } = await supabase.from("transfers")
+      .select("id, raw").eq("id", transfer.id).maybeSingle();
+    if (readError) throw readError;
+    const raw = existing?.raw && typeof existing.raw === "object" ? existing.raw : (transfer.raw && typeof transfer.raw === "object" ? transfer.raw : transfer);
+    const deletedRaw = { ...raw, __app_deleted: true, __app_deleted_at: new Date().toISOString() };
+    if (existing) {
+      const { error } = await supabase.from("transfers").update({ raw: deletedRaw }).eq("id", transfer.id);
+      if (error) throw error;
+    } else {
+      const { error } = await supabase.from("transfers").insert({
+        id: transfer.id, date: transfer.date, from_store: transfer.fromStore, to_store: transfer.toStore,
+        notes: transfer.notes || null, subtotal: transfer.subtotal || 0, hst: transfer.hst || 0,
+        total: transfer.total || 0, created_at: transfer.createdAt || new Date().toISOString(),
+        reconciled_with: transfer.reconciledWith || null, raw: deletedRaw,
+      });
+      if (error) throw error;
+    }
+    const { error: itemError } = await supabase.from("transfer_items").delete().eq("transfer_id", transfer.id);
+    if (itemError) throw itemError;
+    return;
+  }
+
+  const remove = value => (Array.isArray(value) ? value : []).filter(item => item?.id !== transfer.id);
+  if (window.storage?.get && window.storage?.set) {
+    const result = await window.storage.get("transfers", true);
+    await window.storage.set("transfers", JSON.stringify(remove(result?.value ? JSON.parse(result.value) : [])), true);
+  } else {
+    window.localStorage.setItem("store-transfer:transfers", JSON.stringify(remove(JSON.parse(window.localStorage.getItem("store-transfer:transfers") || "[]"))));
   }
 }
 
@@ -6013,13 +6054,17 @@ export default function StoreTransferApp() {
     setTransferToEdit(null);
   }, []);
 
-  const handleDeleteTransfer = useCallback((id) => {
-    setTransfers(prev => {
-      const next = prev.filter(t => t.id !== id);
-      saveTransfers(next);
-      return next;
-    });
-  }, []);
+  const handleDeleteTransfer = useCallback(async (id) => {
+    const transfer = transfers.find(t => t.id === id);
+    if (!transfer) return;
+    try {
+      await deleteTransferFromStorage(transfer);
+      setTransfers(prev => prev.filter(t => t.id !== id));
+    } catch (error) {
+      console.error("Could not delete transfer", error);
+      window.alert(`Could not delete transfer: ${error.message || "Check your Supabase connection and access policies."}`);
+    }
+  }, [transfers]);
 
   const handleAddProducts = useCallback((newProducts) => {
     setProducts(prev => {
@@ -6101,10 +6146,11 @@ export default function StoreTransferApp() {
         if (error) throw error;
       }
 
-      const { data: sharedTransfers, error: transferReadError } = await supabase.from("transfers").select("id, reconciled_with");
+      const { data: sharedTransfers, error: transferReadError } = await supabase.from("transfers").select("id, reconciled_with, raw");
       if (transferReadError) throw transferReadError;
       const existingTransfers = new Map((sharedTransfers || []).map(t => [t.id, t]));
-      const transfersToInsert = localTransfers.filter(t => t?.id && !existingTransfers.has(t.id));
+      const mergeableTransfers = localTransfers.filter(t => t?.id && existingTransfers.get(t.id)?.raw?.__app_deleted !== true);
+      const transfersToInsert = mergeableTransfers.filter(t => !existingTransfers.has(t.id));
       const transferRows = transfersToInsert.map(t => ({
         id: t.id, date: t.date, from_store: t.fromStore, to_store: t.toStore, notes: t.notes,
         subtotal: t.subtotal, hst: t.hst, total: t.total, created_at: t.createdAt || new Date().toISOString(),
@@ -6115,7 +6161,7 @@ export default function StoreTransferApp() {
         if (error) throw error;
       }
       const existingItemCounts = new Map();
-      const transferIds = localTransfers.map(t => t?.id).filter(Boolean);
+      const transferIds = mergeableTransfers.map(t => t?.id).filter(Boolean);
       for (let idOffset = 0; idOffset < transferIds.length; idOffset += 100) {
         const idBatch = transferIds.slice(idOffset, idOffset + 100);
         let pageOffset = 0;
@@ -6133,7 +6179,7 @@ export default function StoreTransferApp() {
         }
       }
       const items = [];
-      for (const transfer of localTransfers) {
+      for (const transfer of mergeableTransfers) {
         for (const item of transfer.items || []) {
           const row = {
             transfer_id: transfer.id, sku: item.sku || null, name: item.name, category: item.category || null,
@@ -6149,7 +6195,7 @@ export default function StoreTransferApp() {
         const { error } = await supabase.from("transfer_items").insert(items.slice(offset, offset + 500));
         if (error) throw error;
       }
-      for (const transfer of localTransfers) {
+      for (const transfer of mergeableTransfers) {
         const existing = existingTransfers.get(transfer.id);
         if (!existing || !Array.isArray(transfer.reconciledWith)) continue;
         const merged = Array.from(new Set([...(Array.isArray(existing.reconciled_with) ? existing.reconciled_with : []), ...transfer.reconciledWith]));
@@ -6158,7 +6204,8 @@ export default function StoreTransferApp() {
           if (error) throw error;
         }
       }
-      setMergeStatus(`Done: added ${productsToInsert.length} products and ${transfersToInsert.length} transfers. ${Math.max(0, localProducts.length - productsToInsert.length)} existing product SKUs and ${Math.max(0, localTransfers.length - transfersToInsert.length)} transfer IDs were preserved.`);
+      const deletedTransfersSkipped = localTransfers.length - mergeableTransfers.length;
+      setMergeStatus(`Done: added ${productsToInsert.length} products and ${transfersToInsert.length} transfers. ${Math.max(0, localProducts.length - productsToInsert.length)} existing product SKUs and ${Math.max(0, mergeableTransfers.length - transfersToInsert.length)} existing transfer IDs were preserved.${deletedTransfersSkipped ? ` Skipped ${deletedTransfersSkipped} previously deleted transfer${deletedTransfersSkipped === 1 ? "" : "s"}.` : ""}`);
       setReloadCount(n => n + 1);
     } catch (error) {
       console.error("Local data merge failed", error);
