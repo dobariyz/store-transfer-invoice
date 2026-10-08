@@ -5550,6 +5550,11 @@ function blankProductRow() {
   return { id: uid(), sku: "", name: "", category: "Convenience", unitPrice: "", priceType: "Per Unit", packQty: 1 };
 }
 
+function normalizePriceType(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized.includes("pack") ? "Pack Price" : "Per Unit";
+}
+
 function parseInvoiceText(text, existingSkus) {
   return text.split(/\r?\n/).map(line => line.replace(/\s+/g, " ").trim()).filter(Boolean).map(line => {
     const priceMatches = [...line.matchAll(/\$?\d{1,6}(?:,\d{3})*(?:\.\d{2})/g)].map(m => Number(m[0].replace(/[$,]/g, "")));
@@ -5607,7 +5612,7 @@ function AddProductsView({ products, onAddProducts }) {
       const priceKey = findHeaderKey(headers, ["Unit Price", "Price"]);
       const catKey = findHeaderKey(headers, ["Category"]);
       const typeKey = findHeaderKey(headers, ["Price Type"]);
-      const packKey = findHeaderKey(headers, ["Pack Qty"]);
+      const packKey = findHeaderKey(headers, ["Pack Qty", "Pack Quantity"]);
       if (!nameKey || !priceKey) {
         setError("Expected columns: Product Name and Unit Price (SKU, Category, and Price Type optional).");
         return;
@@ -5619,9 +5624,10 @@ function AddProductsView({ products, onAddProducts }) {
         const unitPrice = rawPrice === "" || rawPrice == null ? NaN : Number(rawPrice);
         const sheetCategory = catKey && r[catKey] ? String(r[catKey]).trim() : "";
         const category = bulkCategory === "spreadsheet" ? (sheetCategory || "Other") : bulkCategory;
-        const priceType = typeKey && r[typeKey] ? String(r[typeKey]).trim() : "Per Unit";
-        const packQty = packKey && r[packKey] ? Number(r[packKey]) : 1;
-        const valid = !!name && Number.isFinite(unitPrice) && unitPrice >= 0;
+        const priceType = normalizePriceType(typeKey && r[typeKey] ? r[typeKey] : "Per Unit");
+        const rawPackQty = packKey && r[packKey] !== "" && r[packKey] != null ? Number(r[packKey]) : 1;
+        const packQty = Number.isSafeInteger(rawPackQty) && rawPackQty > 0 ? rawPackQty : NaN;
+        const valid = !!name && Number.isFinite(unitPrice) && unitPrice >= 0 && Number.isFinite(packQty);
         const isDuplicate = !!sku && existingSkus.has(sku);
         return {
           id: uid(), sku, name, category, sheetCategory, unitPrice, priceType, packQty,
@@ -5675,6 +5681,13 @@ function AddProductsView({ products, onAddProducts }) {
   };
 
   const toggleInclude = (id) => setBulkRows(rs => rs.map(r => r.id === id ? { ...r, include: !r.include } : r));
+  const updateBulkRow = (id, patch) => setBulkRows(rs => rs.map(row => {
+    if (row.id !== id) return row;
+    const updated = { ...row, ...patch };
+    updated.valid = !!updated.name.trim() && String(updated.unitPrice).trim() !== "" && Number.isFinite(Number(updated.unitPrice)) && Number(updated.unitPrice) >= 0 && String(updated.packQty).trim() !== "" && Number.isSafeInteger(Number(updated.packQty)) && Number(updated.packQty) > 0;
+    if (!updated.valid) updated.include = false;
+    return updated;
+  }));
   const includedCount = bulkRows.filter(r => r.include).length;
 
   const handleImportBulk = () => {
@@ -5799,7 +5812,7 @@ function AddProductsView({ products, onAddProducts }) {
             >
               <Upload size={26} color="#a3a8b8" style={{ marginBottom: 10 }} />
               <div style={{ fontFamily: "'Inter', sans-serif", fontWeight: 600, fontSize: 14.5, color: "#3a3f4c" }}>Drop a product sheet here, or click to browse</div>
-              <div style={{ fontSize: 12, color: "#9aa0ae", marginTop: 5 }}>.xlsx or .csv — columns: SKU, Product Name, Unit Price (Category and Price Type optional)</div>
+      <div style={{ fontSize: 12, color: "#9aa0ae", marginTop: 5 }}>.xlsx or .csv — columns: SKU, Product Name, Price, Price Type (Unit/Pack), Pack Qty, Category</div>
               <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }}
                 onChange={e => e.target.files[0] && handleBulkFile(e.target.files[0])} />
             </div>
@@ -5822,11 +5835,11 @@ function AddProductsView({ products, onAddProducts }) {
                   {CATEGORY_OPTIONS.map(category => <option key={category} value={category}>{category}</option>)}
                 </select>
               </label>
-              <div style={{ border: "1px solid #e8e9ee", borderRadius: 10, overflow: "hidden", marginBottom: 16 }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+              <div style={{ border: "1px solid #e8e9ee", borderRadius: 10, overflow: "auto", marginBottom: 16 }}>
+                <table style={{ width: "100%", minWidth: 1040, borderCollapse: "collapse", fontSize: 12.5 }}>
                   <thead>
                     <tr style={{ background: "#f8f8fa", textAlign: "left" }}>
-                      {["Include", "SKU", "Product Name", "Category", "Unit Price", "Status"].map(h => (
+                      {["Include", "SKU", "Product Name", "Category", "Price", "Price Type", "Pack Qty", "Status"].map(h => (
                         <th key={h} style={{ padding: "8px 10px", fontWeight: 600, color: "#6b7080", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.03em" }}>{h}</th>
                       ))}
                     </tr>
@@ -5837,10 +5850,12 @@ function AddProductsView({ products, onAddProducts }) {
                         <td style={{ padding: "7px 10px" }}>
                           <input type="checkbox" checked={r.include} disabled={!r.valid} onChange={() => toggleInclude(r.id)} />
                         </td>
-                        <td style={{ padding: "7px 10px", fontFamily: "'IBM Plex Mono', monospace", color: "#666" }}>{r.sku || "—"}</td>
-                        <td style={{ padding: "7px 10px", fontWeight: 500 }}>{r.name || "—"}</td>
+                        <td style={{ padding: "7px 10px", fontFamily: "'IBM Plex Mono', monospace", color: "#666" }}><input value={r.sku} onChange={e => updateBulkRow(r.id, { sku: e.target.value })} aria-label={`SKU for ${r.name}`} style={{ width: 125, padding: 5, border: "1px solid #ddd", borderRadius: 5 }} /></td>
+                        <td style={{ padding: "7px 10px", fontWeight: 500 }}><input value={r.name} onChange={e => updateBulkRow(r.id, { name: e.target.value })} aria-label="Product name" style={{ width: 220, padding: 5, border: "1px solid #ddd", borderRadius: 5 }} /></td>
                         <td style={{ padding: "7px 10px" }}>{r.category ? <CategoryBadge category={r.category} /> : "—"}</td>
-                        <td style={{ padding: "7px 10px", fontFamily: "'IBM Plex Mono', monospace" }}>{isNaN(r.unitPrice) ? "—" : money(r.unitPrice)}</td>
+                        <td style={{ padding: "7px 10px" }}><input type="number" min="0" step="0.01" value={Number.isFinite(Number(r.unitPrice)) ? r.unitPrice : ""} onChange={e => updateBulkRow(r.id, { unitPrice: e.target.value })} aria-label={`Price for ${r.name}`} style={{ width: 95, padding: 5, border: "1px solid #ddd", borderRadius: 5 }} /></td>
+                        <td style={{ padding: "7px 10px" }}><select value={r.priceType} onChange={e => updateBulkRow(r.id, { priceType: e.target.value })} aria-label={`Price type for ${r.name}`} style={{ padding: 5, border: "1px solid #ddd", borderRadius: 5 }}><option value="Per Unit">Unit</option><option value="Pack Price">Pack</option></select></td>
+                        <td style={{ padding: "7px 10px" }}><input type="number" min="1" step="1" value={r.packQty} onChange={e => updateBulkRow(r.id, { packQty: e.target.value })} aria-label={`Pack quantity for ${r.name}`} style={{ width: 70, padding: 5, border: "1px solid #ddd", borderRadius: 5 }} /></td>
                         <td style={{ padding: "7px 10px" }}>
                           {!r.valid ? <StatusPill status="unmatched" /> : r.isDuplicate ? <StatusPill status="ambiguous" /> : <StatusPill status="matched" />}
                         </td>
