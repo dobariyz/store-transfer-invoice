@@ -5568,6 +5568,7 @@ function AddProductsView({ products, onAddProducts }) {
   const [manualRows, setManualRows] = useState([blankProductRow(), blankProductRow(), blankProductRow()]);
   const [savedCount, setSavedCount] = useState(null);
   const [bulkRows, setBulkRows] = useState([]);
+  const [bulkCategory, setBulkCategory] = useState("spreadsheet");
   const [fileName, setFileName] = useState("");
   const [error, setError] = useState("");
   const [invoiceRows, setInvoiceRows] = useState([]);
@@ -5616,13 +5617,14 @@ function AddProductsView({ products, onAddProducts }) {
         const name = r[nameKey] == null ? "" : String(r[nameKey]).trim();
         const rawPrice = r[priceKey];
         const unitPrice = rawPrice === "" || rawPrice == null ? NaN : Number(rawPrice);
-        const category = catKey && r[catKey] ? String(r[catKey]).trim() : "Other";
+        const sheetCategory = catKey && r[catKey] ? String(r[catKey]).trim() : "";
+        const category = bulkCategory === "spreadsheet" ? (sheetCategory || "Other") : bulkCategory;
         const priceType = typeKey && r[typeKey] ? String(r[typeKey]).trim() : "Per Unit";
         const packQty = packKey && r[packKey] ? Number(r[packKey]) : 1;
         const valid = !!name && Number.isFinite(unitPrice) && unitPrice >= 0;
         const isDuplicate = !!sku && existingSkus.has(sku);
         return {
-          id: uid(), sku, name, category, unitPrice, priceType, packQty,
+          id: uid(), sku, name, category, sheetCategory, unitPrice, priceType, packQty,
           valid, isDuplicate, include: valid && !isDuplicate,
         };
       });
@@ -5809,6 +5811,17 @@ function AddProductsView({ products, onAddProducts }) {
                 </div>
                 <button onClick={() => { setBulkRows([]); setFileName(""); }} style={ghostBtn}>Start over</button>
               </div>
+              <label style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 12, color: "#4d5361", fontSize: 12.5 }}>
+                Category for this upload
+                <select value={bulkCategory} onChange={e => {
+                  const category = e.target.value;
+                  setBulkCategory(category);
+                  setBulkRows(rows => rows.map(row => ({ ...row, category: category === "spreadsheet" ? (row.sheetCategory || "Other") : category })));
+                }} style={{ padding: "7px 9px", border: "1px solid #d8dbe3", borderRadius: 7, background: "#fff", fontSize: 12.5 }}>
+                  <option value="spreadsheet">Use spreadsheet categories</option>
+                  {CATEGORY_OPTIONS.map(category => <option key={category} value={category}>{category}</option>)}
+                </select>
+              </label>
               <div style={{ border: "1px solid #e8e9ee", borderRadius: 10, overflow: "hidden", marginBottom: 16 }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
                   <thead>
