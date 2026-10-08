@@ -4493,6 +4493,12 @@ function getSupabaseClient() {
   return supabaseClient;
 }
 
+function normalizePackQty(value) {
+  if (value == null || value === "") return null;
+  const quantity = Number(value);
+  return Number.isSafeInteger(quantity) && quantity > 0 ? quantity : null;
+}
+
 async function loadTransfers() {
   try {
     const supabase = getSupabaseClient();
@@ -4590,7 +4596,7 @@ async function saveProducts(products) {
   try {
     const supabase = getSupabaseClient();
     if (supabase) {
-      const toUpsert = products.map(p => ({ sku: p.sku, name: p.name, category: p.category, subcategory: p.subcategory || null, unit_price: p.unitPrice, price_type: p.priceType, pack_qty: p.packQty || null, pack_price: p.packPrice || null, metadata: p.metadata || null, created_at: p.createdAt || new Date().toISOString() }));
+      const toUpsert = products.map(p => ({ sku: p.sku, name: p.name, category: p.category, subcategory: p.subcategory || null, unit_price: p.unitPrice, price_type: p.priceType, pack_qty: normalizePackQty(p.packQty), pack_price: p.packPrice || null, metadata: p.metadata || null, created_at: p.createdAt || new Date().toISOString() }));
       const { error } = await supabase.from('products').upsert(toUpsert);
       if (error) console.error('upsert products error', error);
       return;
@@ -6084,11 +6090,11 @@ export default function StoreTransferApp() {
       const sharedSkus = new Set((sharedProducts || []).map(p => p.sku));
       const productsToInsert = localProducts.filter(p => p?.sku && !sharedSkus.has(p.sku)).map(p => ({
         sku: p.sku, name: p.name, category: p.category, subcategory: p.subcategory || null,
-        unit_price: p.unitPrice, price_type: p.priceType || "Per Unit", pack_qty: p.packQty || null,
+        unit_price: p.unitPrice, price_type: p.priceType || "Per Unit", pack_qty: normalizePackQty(p.packQty),
         pack_price: p.packPrice || null, metadata: p.metadata || null, created_at: p.createdAt || new Date().toISOString(),
       }));
       if (!sharedProducts?.length && !localProducts.length) {
-        productsToInsert.push(...PRODUCTS_SEED.map(p => ({ sku: p.sku, name: p.name, category: p.category, subcategory: p.subcategory || null, unit_price: p.unitPrice, price_type: p.priceType || "Per Unit", pack_qty: p.packQty || null, pack_price: p.packPrice || null, metadata: p.metadata || null, created_at: new Date().toISOString() })));
+        productsToInsert.push(...PRODUCTS_SEED.map(p => ({ sku: p.sku, name: p.name, category: p.category, subcategory: p.subcategory || null, unit_price: p.unitPrice, price_type: p.priceType || "Per Unit", pack_qty: normalizePackQty(p.packQty), pack_price: p.packPrice || null, metadata: p.metadata || null, created_at: new Date().toISOString() })));
       }
       if (productsToInsert.length) {
         const { error } = await supabase.from("products").insert(productsToInsert);
