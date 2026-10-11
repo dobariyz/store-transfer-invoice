@@ -4513,7 +4513,7 @@ async function loadTransfers() {
       const itemsById = {};
       (items || []).forEach(it => {
         itemsById[it.transfer_id] = itemsById[it.transfer_id] || [];
-        itemsById[it.transfer_id].push({ sku: it.sku, name: it.name, category: it.category, qty: it.qty, unitPrice: it.unit_price ?? it.unitPrice, lineTotal: it.line_total ?? it.lineTotal, metadata: it.metadata });
+        itemsById[it.transfer_id].push({ sku: it.sku, name: it.name, category: it.category, qty: it.qty, unitPrice: it.unit_price ?? it.unitPrice, lineTotal: it.line_total ?? it.lineTotal, price: it.metadata?.price, priceType: it.metadata?.priceType, unitsPerPack: it.metadata?.unitsPerPack, metadata: it.metadata });
       });
       return tdata.filter(t => t.raw?.__app_deleted !== true).map(t => ({ id: t.id, date: t.date, fromStore: t.from_store || t.fromStore, toStore: t.to_store || t.toStore, notes: t.notes, subtotal: t.subtotal, hst: t.hst, total: t.total, createdAt: t.created_at, reconciledWith: t.reconciled_with, raw: t.raw, items: itemsById[t.id] || [] }));
     }
@@ -4790,12 +4790,24 @@ function ProductPicker({ value, onSelect, onClose, products }) {
   );
 }
 
+function catalogPriceForType(product, priceType) {
+  if (!product) return NaN;
+  return Number(priceType === "Pack Price" ? (product.packPrice ?? product.unitPrice) : product.unitPrice);
+}
+
 function NewTransferView({ stores, products, onCreateTransfer, initialTransfer }) {
   const [entryMode, setEntryMode] = useState(initialTransfer ? "manual" : "upload");
-  const [rows, setRows] = useState(() => initialTransfer ? initialTransfer.items.map((item, i) => ({
-    id: uid(), rowNum: i + 1, sku: item.sku, inputName: item.name, qty: item.qty,
-    product: products.find(p => p.sku === item.sku && p.name === item.name) || item, status: "matched",
-  })) : []);
+  const [rows, setRows] = useState(() => initialTransfer ? initialTransfer.items.map((item, i) => {
+    const product = products.find(p => p.sku === item.sku && p.name === item.name) || item;
+    const priceType = item.priceType || item.metadata?.priceType || product.priceType || "Per Unit";
+    return {
+      id: uid(), rowNum: i + 1, sku: item.sku, inputName: item.name, qty: item.qty,
+      product, priceType,
+      unitsPerPack: item.unitsPerPack ?? item.metadata?.unitsPerPack ?? product.packQty ?? 1,
+      price: item.price ?? item.metadata?.price ?? catalogPriceForType(product, priceType),
+      status: "matched",
+    };
+  }) : []);
   const [fromStore, setFromStore] = useState(initialTransfer?.fromStore || stores[0]);
   const [toStore, setToStore] = useState(initialTransfer?.toStore || stores[1] || stores[0]);
   const [date, setDate] = useState(initialTransfer?.date || new Date().toISOString().slice(0, 10));
@@ -4834,9 +4846,12 @@ function NewTransferView({ stores, products, onCreateTransfer, initialTransfer }
         const rowTo = toKey && r[toKey] ? String(r[toKey]).trim() : "";
         if (!sku && !productName) return null;
         const match = matchProduct({ sku, productName }, skuIndex, products);
+        const priceType = match.product?.priceType || "Per Unit";
         return {
           id: uid(), rowNum: i + 2, sku: sku || (match.product ? match.product.sku : ""),
           inputName: productName, qty: qty || 1,
+          priceType, unitsPerPack: match.product?.packQty ?? 1,
+          price: catalogPriceForType(match.product, priceType),
           rowFrom, rowTo,
           product: match.product, status: match.status,
         };
@@ -4857,24 +4872,42 @@ function NewTransferView({ stores, products, onCreateTransfer, initialTransfer }
   const removeRow = (id) => setRows(rs => rs.filter(r => r.id !== id));
   const addManualItem = () => {
     setEntryMode("manual");
-    setRows(rs => [...rs, { id: uid(), rowNum: rs.length + 1, sku: "", inputName: "", qty: 1, product: null, status: "unmatched" }]);
+    setRows(rs => [...rs, { id: uid(), rowNum: rs.length + 1, sku: "", inputName: "", qty: 1, product: null, priceType: "Per Unit", unitsPerPack: "", price: NaN, status: "unmatched" }]);
+  };
+
+  const rowPricing = r => {
+    const priceType = r.priceType || r.product?.priceType || "Per Unit";
+    const price = Number(r.price ?? catalogPriceForType(r.product, priceType));
+    const unitsPerPack = Number(r.unitsPerPack ?? r.product?.packQty);
+    const unitPrice = priceType === "Pack Price" ? (unitsPerPack > 0 ? price / unitsPerPack : NaN) : price;
+    return { priceType, price, unitsPerPack, unitPrice, lineTotal: unitPrice * Number(r.qty) };
   };
 
   const matchedCount = rows.filter(r => r.product).length;
   const totalRows = rows.length;
-  const subtotal = rows.reduce((sum, r) => r.product ? sum + r.product.unitPrice * r.qty : sum, 0);
+  const subtotal = rows.reduce((sum, r) => r.product ? sum + round2(rowPricing(r).lineTotal) : sum, 0);
   const hst = subtotal * HST_RATE;
   const total = subtotal + hst;
 
   const canGenerate = rows.length > 0
-    && rows.every(r => r.product && r.status === "matched" && Number.isInteger(r.qty) && r.qty > 0)
+    && rows.every(r => {
+      const pricing = rowPricing(r);
+      return r.product && r.status === "matched" && Number.isInteger(r.qty) && r.qty > 0
+        && Number.isFinite(pricing.price) && pricing.price >= 0 && Number.isFinite(pricing.unitPrice)
+        && (pricing.priceType !== "Pack Price" || (Number.isSafeInteger(pricing.unitsPerPack) && pricing.unitsPerPack > 0));
+    })
     && fromStore !== toStore;
 
   const handleGenerate = () => {
-    const items = rows.map(r => ({
-      sku: r.product.sku, name: r.product.name, category: r.product.category,
-      qty: r.qty, unitPrice: r.product.unitPrice, lineTotal: round2(r.product.unitPrice * r.qty),
-    }));
+    const items = rows.map(r => {
+      const pricing = rowPricing(r);
+      const metadata = { ...(r.product.metadata || {}), priceType: pricing.priceType, price: pricing.price, unitsPerPack: pricing.priceType === "Pack Price" ? pricing.unitsPerPack : null };
+      return {
+        sku: r.product.sku, name: r.product.name, category: r.product.category,
+        qty: r.qty, unitPrice: round2(pricing.unitPrice), lineTotal: round2(pricing.lineTotal),
+        price: pricing.price, priceType: pricing.priceType, unitsPerPack: metadata.unitsPerPack, metadata,
+      };
+    });
     const t = {
       id: initialTransfer?.id || uid(), date, fromStore, toStore, notes, items,
       subtotal: round2(subtotal), hst: round2(hst), total: round2(total),
@@ -4958,11 +4991,11 @@ function NewTransferView({ stores, products, onCreateTransfer, initialTransfer }
             </div>
           </div>
 
-          <div style={{ border: "1px solid #e8e9ee", borderRadius: 10, overflow: "hidden", marginBottom: 18 }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+          <div style={{ border: "1px solid #e8e9ee", borderRadius: 10, overflow: "auto", marginBottom: 18 }}>
+            <table style={{ width: "100%", minWidth: 1120, borderCollapse: "collapse", fontSize: 12.5 }}>
               <thead>
                 <tr style={{ background: "#f8f8fa", textAlign: "left" }}>
-                  {["Row", "Matched Product", "SKU", "Category", "Qty", "Unit Price", "Line Total", "Status", ""].map(h => (
+                  {["Row", "Matched Product", "SKU", "Category", "Qty", "Price Type", "Total Units in Pack", "Price", "Line Total", "Status", ""].map(h => (
                     <th key={h} style={{ padding: "8px 10px", fontWeight: 600, color: "#6b7080", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.03em" }}>{h}</th>
                   ))}
                 </tr>
@@ -4983,8 +5016,20 @@ function NewTransferView({ stores, products, onCreateTransfer, initialTransfer }
                       <input type="number" min="1" step="1" value={r.qty} onChange={e => updateRow(r.id, { qty: Number(e.target.value) || 0 })}
                         style={{ width: 52, padding: "3px 6px", border: "1px solid #ddd", borderRadius: 5, fontFamily: "'IBM Plex Mono', monospace" }} />
                     </td>
-                    <td style={{ padding: "8px 10px", fontFamily: "'IBM Plex Mono', monospace" }}>{r.product ? money(r.product.unitPrice) : "—"}</td>
-                    <td style={{ padding: "8px 10px", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600 }}>{r.product ? money(r.product.unitPrice * r.qty) : "—"}</td>
+                    <td style={{ padding: "8px 10px" }}>
+                      <select value={r.priceType || r.product?.priceType || "Per Unit"} disabled={!r.product}
+                        onChange={e => updateRow(r.id, { priceType: e.target.value, price: catalogPriceForType(r.product, e.target.value), unitsPerPack: r.unitsPerPack || r.product?.packQty || 1 })}
+                        style={{ padding: "4px 5px", border: "1px solid #ddd", borderRadius: 5, fontSize: 11.5 }}>
+                        <option value="Per Unit">Unit Price</option><option value="Pack Price">Pack Price</option>
+                      </select>
+                    </td>
+                    <td style={{ padding: "8px 10px" }}>
+                      {r.product && (r.priceType || r.product.priceType) === "Pack Price"
+                        ? <input type="number" min="1" step="1" value={r.unitsPerPack ?? ""} onChange={e => updateRow(r.id, { unitsPerPack: e.target.value })} aria-label={`Total units in pack for ${r.product.name}`} style={{ width: 78, padding: "3px 6px", border: "1px solid #ddd", borderRadius: 5 }} />
+                        : <span style={{ color: "#999" }}>—</span>}
+                    </td>
+                    <td style={{ padding: "8px 10px", fontFamily: "'IBM Plex Mono', monospace" }}>{r.product ? money(rowPricing(r).price) : "—"}</td>
+                    <td style={{ padding: "8px 10px", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600 }}>{r.product && Number.isFinite(rowPricing(r).lineTotal) ? money(rowPricing(r).lineTotal) : "—"}</td>
                     <td style={{ padding: "8px 10px" }}><StatusPill status={r.status} /></td>
                     <td style={{ padding: "8px 10px" }}>
                       <Trash2 size={14} color="#c3c7d1" style={{ cursor: "pointer" }} onClick={() => removeRow(r.id)} />
@@ -4995,10 +5040,10 @@ function NewTransferView({ stores, products, onCreateTransfer, initialTransfer }
             </table>
           </div>
 
-          {rows.some(r => !r.product || r.status !== "matched" || !Number.isInteger(r.qty) || r.qty <= 0) && (
+          {rows.some(r => !r.product || r.status !== "matched" || !Number.isInteger(r.qty) || r.qty <= 0 || (r.priceType === "Pack Price" && (!Number.isSafeInteger(Number(r.unitsPerPack)) || Number(r.unitsPerPack) <= 0))) && (
             <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: "#fff8e1", border: "1px solid #f5e2a8", borderRadius: 8, padding: "10px 14px", marginBottom: 18, fontSize: 12.5, color: "#8a6116" }}>
               <AlertTriangle size={15} style={{ flexShrink: 0, marginTop: 1 }} />
-              Review every row before generating: choose a product for unmatched, fuzzy, or duplicate matches, and enter a whole quantity of at least 1.
+              Review every row before generating: choose a product for unmatched, fuzzy, or duplicate matches, enter a whole quantity of at least 1, and provide a positive whole pack size for pack-priced items.
             </div>
           )}
 
@@ -5039,7 +5084,10 @@ function NewTransferView({ stores, products, onCreateTransfer, initialTransfer }
         <ProductPicker
           products={products}
           onClose={() => setPickerIndex(null)}
-          onSelect={(p) => updateRow(pickerIndex, { product: p, status: "matched", sku: p.sku })}
+          onSelect={(p) => {
+            const priceType = p.priceType || "Per Unit";
+            updateRow(pickerIndex, { product: p, status: "matched", sku: p.sku, priceType, unitsPerPack: p.packQty ?? 1, price: catalogPriceForType(p, priceType) });
+          }}
         />
       )}
     </div>
@@ -5115,7 +5163,7 @@ function InvoiceSlip({ invoice }) {
           <tr style={{ borderBottom: "1px solid #e8e9ee", textAlign: "left" }}>
             <th style={{ padding: "0 0 8px 0", fontSize: 10.5, color: "#999", textTransform: "uppercase", letterSpacing: "0.03em" }}>Item</th>
             <th style={{ padding: "0 0 8px 0", fontSize: 10.5, color: "#999", textTransform: "uppercase", letterSpacing: "0.03em", textAlign: "center" }}>Qty</th>
-            <th style={{ padding: "0 0 8px 0", fontSize: 10.5, color: "#999", textTransform: "uppercase", letterSpacing: "0.03em", textAlign: "right" }}>Unit</th>
+            <th style={{ padding: "0 0 8px 0", fontSize: 10.5, color: "#999", textTransform: "uppercase", letterSpacing: "0.03em", textAlign: "right" }}>Price</th>
             <th style={{ padding: "0 0 8px 0", fontSize: 10.5, color: "#999", textTransform: "uppercase", letterSpacing: "0.03em", textAlign: "right" }}>Total</th>
           </tr>
         </thead>
@@ -5125,9 +5173,10 @@ function InvoiceSlip({ invoice }) {
               <td style={{ padding: "8px 0" }}>
                 <div style={{ fontWeight: 500 }}>{it.name}</div>
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: "#aaa" }}>{it.sku}</div>
+                {it.priceType === "Pack Price" && <div style={{ fontSize: 10.5, color: "#767c8c", marginTop: 2 }}>Pack Price · {it.unitsPerPack ?? it.metadata?.unitsPerPack} units per pack</div>}
               </td>
               <td style={{ padding: "8px 0", textAlign: "center", fontFamily: "'IBM Plex Mono', monospace" }}>{it.qty}</td>
-              <td style={{ padding: "8px 0", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: "#666" }}>{money(it.unitPrice)}</td>
+              <td style={{ padding: "8px 0", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", color: "#666" }}>{money(it.price ?? it.unitPrice)}</td>
               <td style={{ padding: "8px 0", textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600 }}>{money(it.lineTotal)}</td>
             </tr>
           ))}
@@ -5184,7 +5233,9 @@ function HistoryView({ transfers, loading, onEdit, onDelete }) {
     const lineItemRows = transfers.flatMap(t => t.items.map(it => ({
       "Transfer ID": t.id, "Date": t.date, "From Store": t.fromStore, "To Store": t.toStore,
       "SKU": it.sku, "Product Name": it.name, "Category": it.category, "Qty": it.qty,
-      "Unit Price": it.unitPrice, "Line Total": it.lineTotal
+      "Price Type": it.priceType || it.metadata?.priceType || "Per Unit",
+      "Total Units in Pack": it.unitsPerPack ?? it.metadata?.unitsPerPack ?? "",
+      "Price": it.price ?? it.unitPrice, "Calculated Unit Price": it.unitPrice, "Line Total": it.lineTotal
     })));
     exportToExcel("transfer_history.xlsx", [
       { name: "Transfers", rows: summaryRows },
